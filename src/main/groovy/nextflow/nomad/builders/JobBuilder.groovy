@@ -23,6 +23,7 @@ import io.nomadproject.client.model.Job
 import io.nomadproject.client.model.Spread
 import io.nomadproject.client.model.TaskGroup
 import io.nomadproject.client.model.Task
+import io.nomadproject.client.model.TaskLifecycle
 import io.nomadproject.client.model.ReschedulePolicy
 import io.nomadproject.client.model.RestartPolicy
 import io.nomadproject.client.model.Resources
@@ -31,6 +32,7 @@ import io.nomadproject.client.model.Template
 import io.nomadproject.client.model.VolumeMount
 import io.nomadproject.client.model.VolumeRequest
 import nextflow.nomad.config.NomadJobOpts
+import nextflow.nomad.executor.NomadLifecycleTaskSpec
 import nextflow.nomad.executor.NomadTaskOptionsResolver
 import nextflow.nomad.executor.TaskDirectives
 import nextflow.nomad.models.ConstraintsBuilder
@@ -202,15 +204,20 @@ class JobBuilder {
         }
     }
 
-    static TaskGroup createTaskGroup(TaskRun taskRun, List<String> args, Map<String, String>env, NomadJobOpts jobOpts){
+    static TaskGroup createTaskGroup(TaskRun taskRun, List<String> args, Map<String, String>env, NomadJobOpts jobOpts, List<NomadLifecycleTaskSpec> lifecycleTasks = Collections.emptyList()){
         final ReschedulePolicy taskReschedulePolicy  = resolveReschedulePolicy(taskRun, jobOpts)
         final RestartPolicy taskRestartPolicy  = resolveRestartPolicy(taskRun, jobOpts)
         final List<JobVolume> volumeSpecs = resolveVolumeSpecs(taskRun, jobOpts)
+        final List<NomadLifecycleTaskSpec> extraTasks = lifecycleTasks ?: Collections.emptyList()
 
         def task = createTask(taskRun, args, env, jobOpts, volumeSpecs)
+        List<Task> groupTasks = [task]
+        extraTasks.each { NomadLifecycleTaskSpec spec ->
+            groupTasks.add(createLifecycleTask(spec))
+        }
         def taskGroup = new TaskGroup(
                 name: "nf-taskgroup",
-                tasks: [ task ],
+                tasks: groupTasks,
                 reschedulePolicy: taskReschedulePolicy,
                 restartPolicy: taskRestartPolicy
         )
@@ -238,6 +245,47 @@ class JobBuilder {
             }
         }
         return taskGroup
+    }
+
+    static protected Task createLifecycleTask(NomadLifecycleTaskSpec spec) {
+        if( spec == null ) {
+            throw new IllegalArgumentException('Nomad lifecycle task spec cannot be null')
+        }
+        if( !spec.name ) {
+            throw new IllegalArgumentException('Nomad lifecycle task spec requires `name`')
+        }
+        if( !spec.hook ) {
+            throw new IllegalArgumentException("Nomad lifecycle task `${spec.name}` requires `hook`")
+        }
+        if( !spec.command || spec.command.isEmpty() ) {
+            throw new IllegalArgumentException("Nomad lifecycle task `${spec.name}` requires a non-empty command")
+        }
+
+        final Map<String, Object> config = [
+                command: spec.command.first(),
+                args   : spec.command.size() > 1 ? spec.command.tail() : Collections.emptyList()
+        ] as Map<String, Object>
+        if( spec.config ) {
+            config.putAll(spec.config)
+        }
+        final TaskLifecycle lifecycle = new TaskLifecycle()
+                .hook(spec.hook)
+                .sidecar(spec.sidecar)
+
+        Task task = new Task(
+                name: spec.name,
+                driver: spec.driver ?: 'raw_exec',
+                config: config,
+                env: spec.env ?: Collections.emptyMap(),
+                resources: new Resources()
+                        .CPU(spec.cpu ?: 200)
+                        .memoryMB(spec.memoryMb ?: 128),
+                lifecycle: lifecycle
+        )
+        if( spec.user ) {
+            task.user(spec.user)
+        }
+        return task
     }
 
     static Task createTask(TaskRun task, List<String> args, Map<String, String>env, NomadJobOpts jobOpts) {

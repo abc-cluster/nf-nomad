@@ -75,6 +75,7 @@ class NomadTaskHandler extends TaskHandler implements FusionAwareTask {
     private final RcloneNomadInterop rcloneInterop
     private List<String> preparedSubmitCommand
     private Map<String, String> preparedSubmitEnv
+    private List<NomadLifecycleTaskSpec> preparedLifecycleTasks
 
     NomadTaskHandler(TaskRun task, NomadConfig config, NomadService nomadService) {
         this(task, config, nomadService, Collections.emptyMap(), null)
@@ -90,6 +91,7 @@ class NomadTaskHandler extends TaskHandler implements FusionAwareTask {
         this.rcloneInterop = new RcloneNomadInterop(task, sessionConfig, sessionWorkDir)
         this.preparedSubmitCommand = null
         this.preparedSubmitEnv = Collections.emptyMap()
+        this.preparedLifecycleTasks = Collections.emptyList()
     }
 
 
@@ -227,7 +229,7 @@ class NomadTaskHandler extends TaskHandler implements FusionAwareTask {
 
         final taskLauncher = getSubmitCommand(task)
         final taskEnv = getEnv(task)
-        nomadService.submitTask(this.jobName, task, taskLauncher, taskEnv, debugPath())
+        nomadService.submitTask(this.jobName, task, taskLauncher, taskEnv, preparedLifecycleTasks, debugPath())
         writeDebugMetadataSnapshot()
 
         // Record submission time for placement failure detection
@@ -520,6 +522,7 @@ class NomadTaskHandler extends TaskHandler implements FusionAwareTask {
         rcloneInterop.prepare()
         preparedSubmitCommand = rcloneInterop.submitCommand
         preparedSubmitEnv = rcloneInterop.submitEnv
+        preparedLifecycleTasks = rcloneInterop.lifecycleTasks
     }
 
     protected Integer synchronizeRcloneCompletion() {

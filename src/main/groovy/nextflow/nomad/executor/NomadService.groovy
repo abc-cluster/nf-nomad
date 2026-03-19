@@ -88,10 +88,14 @@ class NomadService implements Closeable{
     }
 
 
-
     String submitTask(String id, TaskRun task, List<String> args, Map<String, String> env, Path saveJsonPath = null) {
+        return submitTask(id, task, args, env, Collections.emptyList(), saveJsonPath)
+    }
+
+    String submitTask(String id, TaskRun task, List<String> args, Map<String, String> env, List<NomadLifecycleTaskSpec> lifecycleTasks, Path saveJsonPath = null) {
         long startTime = System.currentTimeMillis()
         NomadTaskOptionsResolver.validate(task)
+        final List<NomadLifecycleTaskSpec> effectiveLifecycleTasks = lifecycleTasks ?: Collections.emptyList()
 
         Job job = new JobBuilder()
                 .withId(id)
@@ -99,7 +103,7 @@ class NomadService implements Closeable{
                 .withType("batch")
                 .withDatacenters(this.config.jobOpts().datacenters)
                 .withNamespace(this.config.jobOpts().namespace)
-                .withTaskGroups([JobBuilder.createTaskGroup(task, args, env, this.config.jobOpts())])
+                .withTaskGroups([JobBuilder.createTaskGroup(task, args, env, this.config.jobOpts(), effectiveLifecycleTasks)])
                 .build()
 
         JobBuilder.assignDatacenters(task, job)

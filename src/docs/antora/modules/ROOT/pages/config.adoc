@@ -102,6 +102,30 @@ nomad{
 - `dockerVolume`, DEPRECATED
 - `affinitySpec`, DEPRECATED
 - `constraintSpec`, DEPRECATED
+
+=== nf-rclone remote workDir interop (experimental)
+
+When using `nf-rclone` remote work directory mode with the Nomad executor, configure the `rclone.rcloneWorkDir` scope:
+
+[source,groovy]
+----
+rclone {
+    rcloneWorkDir {
+        enabled        = true
+        remote         = 'localminio'
+        remotePath     = 'work/nf-core-demo'
+        transferMode   = 'sidecar'      // task | sidecar
+        sidecarDriver  = 'raw_exec'     // raw_exec | docker
+        sidecarImage   = 'rclone/rclone:latest' // required only for docker sidecar
+        configDelivery = 'hostPath'     // default: hostPath
+        syncBack       = 'all'          // all | declared | none
+        completionTimeout = '60s'
+    }
+}
+----
+
+`configDelivery` defaults to `hostPath`. This keeps rclone credentials/config mounted as a file path (`NXF_RCLONE_CONFIG`) instead of embedding config content in environment payloads (`inline` mode). For remote workDir flows that execute generated `.command.*` files (which may contain arbitrary shell), `hostPath` is the safer default and avoids quoting/encoding edge cases.
+
 === Process directives
 
 The plugin supports process-level Nomad directives in two forms:

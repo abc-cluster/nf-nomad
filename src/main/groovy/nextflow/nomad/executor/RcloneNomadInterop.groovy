@@ -380,13 +380,22 @@ set -euo pipefail
 TASK_DIR="$${NOMAD_ALLOC_DIR:-$${NOMAD_TASK_DIR:-$PWD}}/nf-rclone-task"
 cd "$TASK_DIR"
 if [ ! -f .command.sh ]; then
-  echo "[NOMAD] Missing .command.sh in sidecar task directory: $TASK_DIR" >&2
-  exit 127
+  if [ ! -f .command.run ]; then
+    echo "[NOMAD] Missing .command.run/.command.sh in sidecar task directory: $TASK_DIR" >&2
+    exit 127
+  fi
 fi
-chmod -R a+rwX "$TASK_DIR" || true
-chmod +x .command.sh || true
+if [ -f .command.run ]; then
+  chmod +x .command.run || true
+else
+  chmod +x .command.sh || true
+fi
 set +e
-bash .command.sh > .command.out 2> .command.err
+if [ -f .command.run ]; then
+  bash .command.run > .command.out 2> .command.err
+else
+  bash .command.sh > .command.out 2> .command.err
+fi
 _exit_code=$?
 set -e
 printf '%s' "$_exit_code" > .exitcode
@@ -477,7 +486,7 @@ if [ -n "$${NXF_RCLONE_CONFIG_B64:-}" ]; then
   export NXF_RCLONE_CONFIG="$PWD/.rclone.conf"
 fi
 
-if [ -z "${NXF_RCLONE_CONFIG:-}" ]; then
+if [ -z "$${NXF_RCLONE_CONFIG:-}" ]; then
   echo "[NOMAD] Missing NXF_RCLONE_CONFIG for nf-rclone bootstrap" >&2
   exit 127
 fi

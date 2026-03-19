@@ -63,7 +63,13 @@ class NomadExecutor extends Executor implements ExtensionPoint {
         assert task
         assert task.workDir
         log.trace "[NOMAD] launching process > ${task.name} -- work folder: ${task.workDirStr}"
-        return new NomadTaskHandler(task, this.nomadConfig, service)
+        return new NomadTaskHandler(
+                task,
+                this.nomadConfig,
+                service,
+                (session.config ?: Collections.emptyMap()) as Map,
+                session.workDir
+        )
     }
 
     @Override

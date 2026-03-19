@@ -23,6 +23,7 @@ import io.nomadproject.client.model.TaskState
 import nextflow.exception.ProcessException
 import nextflow.exception.ProcessSubmitException
 import nextflow.executor.BashWrapperBuilder
+import nextflow.executor.ScriptFileCopyStrategy
 import nextflow.fusion.FusionAwareTask
 import nextflow.nomad.config.NomadConfig
 import nextflow.nomad.NomadHelper
@@ -71,14 +72,24 @@ class NomadTaskHandler extends TaskHandler implements FusionAwareTask {
     private final Path errorFile
 
     private final Path exitFile
+    private final RcloneNomadInterop rcloneInterop
+    private List<String> preparedSubmitCommand
+    private Map<String, String> preparedSubmitEnv
 
     NomadTaskHandler(TaskRun task, NomadConfig config, NomadService nomadService) {
+        this(task, config, nomadService, Collections.emptyMap(), null)
+    }
+
+    NomadTaskHandler(TaskRun task, NomadConfig config, NomadService nomadService, Map sessionConfig, Path sessionWorkDir) {
         super(task)
         this.config = config
         this.nomadService = nomadService
         this.outputFile = task.workDir.resolve(TaskRun.CMD_OUTFILE)
         this.errorFile = task.workDir.resolve(TaskRun.CMD_ERRFILE)
         this.exitFile = task.workDir.resolve(TaskRun.CMD_EXIT)
+        this.rcloneInterop = new RcloneNomadInterop(task, sessionConfig, sessionWorkDir)
+        this.preparedSubmitCommand = null
+        this.preparedSubmitEnv = Collections.emptyMap()
     }
 
 
@@ -144,13 +155,33 @@ class NomadTaskHandler extends TaskHandler implements FusionAwareTask {
 
         // if a state exists, include an array of states to determine task status
         if( state?.state && ( ["dead","complete","failed","lost"].contains(state.state))){
+            Integer remoteExit = null
+            if( isRcloneInteropActive() && !fusionEnabled() ) {
+                try {
+                    remoteExit = synchronizeRcloneCompletion()
+                }
+                catch (Exception e) {
+                    task.exitStatus = Integer.MAX_VALUE
+                    task.stdout = outputFile
+                    task.stderr = errorFile
+                    status = TaskStatus.COMPLETED
+                    task.error = new ProcessException("[NOMAD] Failed to synchronize nf-rclone remote artifacts: ${e.message ?: e}")
+                    determineClientNode()
+                    return true
+                }
+            }
             // finalize the task
-            task.exitStatus = readExitFile()
+            task.exitStatus = remoteExit != null ? remoteExit : readExitFile()
             task.stdout = outputFile
             task.stderr = errorFile
             status = TaskStatus.COMPLETED
             if ( !state || state.failed ) {
                 task.error = new ProcessException(failureMessage(state, task.exitStatus as Integer))
+            }
+            if( isRcloneInteropActive() && remoteExit == null && task.exitStatus == Integer.MAX_VALUE && task.error == null ) {
+                task.error = new ProcessException(
+                        "[NOMAD] nf-rclone did not produce a readable remote .exitcode at `${rcloneRemoteExitHint()}` for task `${task.name}`"
+                )
             }
             if (shouldDelete(state)) {
                 nomadService.jobPurge(this.jobName)
@@ -187,6 +218,10 @@ class NomadTaskHandler extends TaskHandler implements FusionAwareTask {
         def builder = createBashWrapper(task)
         builder.build()
 
+        if( isRcloneInteropActive() && !fusionEnabled() ) {
+            prepareRcloneInterop()
+        }
+
         def hash = task.hash?.toString() ?: UUID.randomUUID().toString()
         this.jobName = NomadHelper.sanitizeName(hash + "-" + task.name)
 
@@ -215,6 +250,9 @@ class NomadTaskHandler extends TaskHandler implements FusionAwareTask {
     }
 
     protected List<String> getSubmitCommand(TaskRun task) {
+        if( preparedSubmitCommand ) {
+            return preparedSubmitCommand
+        }
         return fusionEnabled()
                 ? fusionSubmitCli()
                 : classicSubmitCli(task)
@@ -227,9 +265,16 @@ class NomadTaskHandler extends TaskHandler implements FusionAwareTask {
     }
 
     protected BashWrapperBuilder createBashWrapper(TaskRun task) {
-        fusionEnabled()
-                ? fusionLauncher()
-                : new NomadScriptLauncher(task.toTaskBean())
+        if( fusionEnabled() ) {
+            return fusionLauncher()
+        }
+        if( isRcloneInteropActive() ) {
+            def strategy = createRcloneCopyStrategy(task)
+            if( strategy != null ) {
+                return new BashWrapperBuilder(task.toTaskBean(), (ScriptFileCopyStrategy)strategy)
+            }
+        }
+        return new NomadScriptLauncher(task.toTaskBean())
     }
 
     protected Map<String, String> getEnv(TaskRun task) {
@@ -241,6 +286,9 @@ class NomadTaskHandler extends TaskHandler implements FusionAwareTask {
         // Add Nomad-specific debug env variable
         if( SysEnv.containsKey('NF_NOMAD_DEBUG') )
             ret.put('NF_NOMAD_DEBUG', SysEnv.get('NF_NOMAD_DEBUG') )
+        if( preparedSubmitEnv ) {
+            ret += preparedSubmitEnv
+        }
 
         return ret
     }
@@ -462,5 +510,27 @@ class NomadTaskHandler extends TaskHandler implements FusionAwareTask {
                 completeTimeMillis = System.currentTimeMillis()
             }
         }
+    }
+
+    protected boolean isRcloneInteropActive() {
+        return rcloneInterop.enabled
+    }
+
+    protected void prepareRcloneInterop() {
+        rcloneInterop.prepare()
+        preparedSubmitCommand = rcloneInterop.submitCommand
+        preparedSubmitEnv = rcloneInterop.submitEnv
+    }
+
+    protected Integer synchronizeRcloneCompletion() {
+        return rcloneInterop.synchronizeCompletion()
+    }
+
+    protected String rcloneRemoteExitHint() {
+        return rcloneInterop.remoteExitLocation
+    }
+
+    protected Object createRcloneCopyStrategy(TaskRun task) {
+        return rcloneInterop.createCopyStrategy(task)
     }
 }

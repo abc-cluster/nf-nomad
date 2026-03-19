@@ -379,6 +379,43 @@ class NomadTaskHandlerSpec extends Specification{
         !assignedAborted
     }
 
+    void "should fail completed nomad task when nf-rclone exitcode is missing"() {
+        given:
+        Throwable assignedError = null
+        Integer assignedExit = null
+        def task = Mock(TaskRun) {
+            getName() >> 'rclone-missing-exit'
+            getWorkDir() >> Path.of('.')
+            getConfig() >> [tag: null]
+            getProcessor() >> Mock(TaskProcessor) {
+                getExecutor() >> Mock(Executor) {
+                    isFusionEnabled() >> false
+                }
+            }
+            setError(_ as Throwable) >> { Throwable value -> assignedError = value }
+            getError() >> { assignedError }
+            setExitStatus(_ as Integer) >> { Integer value -> assignedExit = value }
+            getExitStatus() >> { assignedExit }
+        }
+        def config = configWithCleanup(NomadJobOpts.CLEANUP_NEVER, false)
+        def service = Mock(NomadService) {
+            isPlacementFailure('job-rclone', _ as Long) >> false
+            getTaskState('job-rclone') >> new TaskState(state: 'complete', failed: false)
+        }
+        def handler = new TestNomadTaskHandler(task, config, service)
+        setPrivateField(handler, 'jobName', 'job-rclone')
+        setPrivateField(handler, 'status', TaskStatus.SUBMITTED)
+
+        when:
+        def completed = handler.checkIfCompleted()
+
+        then:
+        completed
+        assignedExit == Integer.MAX_VALUE
+        assignedError instanceof ProcessException
+        assignedError.message.contains('nf-rclone did not produce a readable remote .exitcode')
+    }
+
     private TaskRun taskWithExitStatus(int exitStatus) {
         Mock(TaskRun) {
             getWorkDir() >> Path.of('.')
@@ -437,5 +474,27 @@ class NomadTaskHandlerSpec extends Specification{
             }
         }
         throw new NoSuchFieldException(field)
+    }
+
+    private static class TestNomadTaskHandler extends NomadTaskHandler {
+
+        TestNomadTaskHandler(TaskRun task, NomadConfig config, NomadService service) {
+            super(task, config, service)
+        }
+
+        @Override
+        protected boolean isRcloneInteropActive() {
+            return true
+        }
+
+        @Override
+        protected Integer synchronizeRcloneCompletion() {
+            return null
+        }
+
+        @Override
+        protected String rcloneRemoteExitHint() {
+            return 'minio:work/run/hash/.exitcode'
+        }
     }
 }

@@ -271,7 +271,10 @@ class NomadTaskHandler extends TaskHandler implements FusionAwareTask {
             return fusionLauncher()
         }
         if( isRcloneInteropActive() ) {
-            def strategy = createRcloneCopyStrategy(task)
+            // In sidecar mode, disable staging in .command.run — lifecycle tasks handle it.
+            // In bootstrap mode, keep staging enabled (the bootstrap script runs .command.run as-is).
+            final boolean stagingDisabled = rcloneInterop.isSidecarMode()
+            def strategy = createRcloneCopyStrategy(task, stagingDisabled)
             if( strategy != null ) {
                 return new BashWrapperBuilder(task.toTaskBean(), (ScriptFileCopyStrategy)strategy)
             }
@@ -534,6 +537,10 @@ class NomadTaskHandler extends TaskHandler implements FusionAwareTask {
     }
 
     protected Object createRcloneCopyStrategy(TaskRun task) {
-        return rcloneInterop.createCopyStrategy(task)
+        return rcloneInterop.createCopyStrategy(task, false)
+    }
+
+    protected Object createRcloneCopyStrategy(TaskRun task, boolean stagingDisabled) {
+        return rcloneInterop.createCopyStrategy(task, stagingDisabled)
     }
 }

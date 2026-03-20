@@ -166,5 +166,42 @@ class JobBuilderSpec extends Specification {
         task.config.image == 'rclone/rclone:latest'
     }
 
+    def "test createLifecycleTask embeds transferManifest in task meta"() {
+        given:
+        def manifestJson = '{"phase":"prestart","taskHash":"ab/hash123","transfers":[]}'
+        def spec = new NomadLifecycleTaskSpec(
+                name: 'nf-rclone-prestart',
+                hook: 'prestart',
+                command: ['bash', '-lc', 'echo pre'],
+                transferManifest: manifestJson,
+                meta: ['nf.phase': 'prestart', 'nf.taskHash': 'ab/hash123']
+        )
+
+        when:
+        def task = JobBuilder.createLifecycleTask(spec)
+
+        then:
+        task.meta != null
+        task.meta['nf.rclone.transferManifest'] == manifestJson
+        task.meta['nf.phase'] == 'prestart'
+        task.meta['nf.taskHash'] == 'ab/hash123'
+    }
+
+    def "test createLifecycleTask without manifest has no meta"() {
+        given:
+        def spec = new NomadLifecycleTaskSpec(
+                name: 'nf-rclone-prestart',
+                hook: 'prestart',
+                command: ['bash', '-lc', 'echo pre']
+        )
+
+        when:
+        def task = JobBuilder.createLifecycleTask(spec)
+
+        then:
+        // meta should be null or empty when no manifest or meta provided
+        task.meta == null || task.meta.isEmpty()
+    }
+
 
 }

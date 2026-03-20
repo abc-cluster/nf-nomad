@@ -80,6 +80,17 @@ class RcloneNomadInterop {
     }
 
     Object createCopyStrategy(TaskRun taskRun) {
+        return createCopyStrategy(taskRun, false)
+    }
+
+    /**
+     * Create an nf-rclone copy strategy for the BashWrapperBuilder.
+     *
+     * @param taskRun          the Nextflow task
+     * @param stagingDisabled  when true, the strategy returns empty stage-in/out scripts
+     *                         (used in sidecar mode where lifecycle tasks handle staging)
+     */
+    Object createCopyStrategy(TaskRun taskRun, boolean stagingDisabled) {
         if( !enabled || !rcloneConfigPath || taskRun == null ) {
             return null
         }
@@ -90,21 +101,38 @@ class RcloneNomadInterop {
             final Map rcloneScope = readMap(sessionConfig, 'rclone')
             final Object rcloneConfig = rcloneConfigClass.getMethod('fromMap', Map).invoke(null, rcloneScope)
             try {
+                // Try the 7-arg constructor (with stagingDisabled flag)
                 return strategyClass
-                        .getConstructor(rcloneConfigClass, String, Path, Path, String, String)
+                        .getConstructor(rcloneConfigClass, String, Path, Path, String, String, boolean)
                         .newInstance(
                                 rcloneConfig,
                                 rcloneConfigPath,
                                 taskRun.workDir,
                                 taskRun.targetDir,
                                 taskRun.config?.getStageInMode(),
-                                taskRun.config?.getStageOutMode()
+                                taskRun.config?.getStageOutMode(),
+                                stagingDisabled
                         )
             }
-            catch (NoSuchMethodException ignored) {
-                return strategyClass
-                        .getConstructor(rcloneConfigClass, String)
-                        .newInstance(rcloneConfig, rcloneConfigPath)
+            catch (NoSuchMethodException ignored1) {
+                try {
+                    // Fall back to 6-arg constructor (no stagingDisabled)
+                    return strategyClass
+                            .getConstructor(rcloneConfigClass, String, Path, Path, String, String)
+                            .newInstance(
+                                    rcloneConfig,
+                                    rcloneConfigPath,
+                                    taskRun.workDir,
+                                    taskRun.targetDir,
+                                    taskRun.config?.getStageInMode(),
+                                    taskRun.config?.getStageOutMode()
+                            )
+                }
+                catch (NoSuchMethodException ignored2) {
+                    return strategyClass
+                            .getConstructor(rcloneConfigClass, String)
+                            .newInstance(rcloneConfig, rcloneConfigPath)
+                }
             }
         }
         catch (ClassNotFoundException e) {
@@ -115,6 +143,13 @@ class RcloneNomadInterop {
             log.warn("[NOMAD] Unable to initialize nf-rclone copy strategy; falling back to Nomad default strategy -- ${e.message ?: e}")
             return null
         }
+    }
+
+    /**
+     * Whether this interop is configured for sidecar (lifecycle task) mode.
+     */
+    boolean isSidecarMode() {
+        return transferMode == TRANSFER_MODE_SIDECAR
     }
 
     void prepare() {
@@ -144,6 +179,17 @@ class RcloneNomadInterop {
         }
         else {
             copyAllArtifacts()
+        }
+
+        // In sidecar mode, verify that the poststop task completed its transfers.
+        // The poststop script writes .rclone-poststop-exitcode on success.
+        if( transferMode == TRANSFER_MODE_SIDECAR && remoteExit != null && remoteExit == 0 ) {
+            Integer poststopExit = readRemotePoststopExitCode()
+            if( poststopExit == null ) {
+                log.warn("[NOMAD] Main task exited 0 but poststop transfer marker is missing at `${remotePoststopExitFile()}` — poststop may have failed")
+                // Write a local marker so downstream can distinguish this case
+                writeLocalPoststopWarning()
+            }
         }
 
         if( remoteExit != null ) {
@@ -198,27 +244,70 @@ class RcloneNomadInterop {
         final Map<String, String> transferEnv = buildTransferEnv()
         final String lifecycleDriver = sidecarDriver ?: SIDECAR_DRIVER_RAW_EXEC
         final String lifecycleUser = lifecycleDriver == SIDECAR_DRIVER_RAW_EXEC ? sidecarUser : null
-        final Map<String, Object> lifecycleConfig
-        if( lifecycleDriver == SIDECAR_DRIVER_DOCKER ) {
-            final Map<String, Object> config = new LinkedHashMap<>()
-            config.put('image', sidecarImage)
-            config.put('entrypoint', ['sh'])
-            config.put('network_mode', 'host')
-            if( configDelivery == 'hostPath' && rcloneConfigPath ) {
-                final String mount = rcloneConfigPath + ':' + rcloneConfigPath + ':ro'
-                config.put('volumes', [mount])
+        final Map<String, Object> lifecycleConfig = buildLifecycleDriverConfig(lifecycleDriver)
+
+        // --- attempt standalone script generation via nf-rclone ---
+        String prestartScriptContent
+        String poststopScriptContent
+        String prestartManifestJson = null
+        String poststopManifestJson = null
+
+        try {
+            def stageResult = generateStandaloneStageIn()
+            if( stageResult != null ) {
+                prestartScriptContent = readProperty(stageResult, 'script')?.toString()
+                def manifest = readProperty(stageResult, 'manifest')
+                if( manifest != null ) {
+                    prestartManifestJson = invokeMethod(manifest, 'toJson')?.toString()
+                }
             }
-            lifecycleConfig = config
         }
-        else {
-            lifecycleConfig = Collections.emptyMap()
+        catch (Exception e) {
+            log.debug("[NOMAD] Standalone stage-in generation not available, falling back to legacy prestart -- ${e.message ?: e}")
+            prestartScriptContent = null
         }
+
+        try {
+            def stageResult = generateStandaloneStageOut()
+            if( stageResult != null ) {
+                poststopScriptContent = readProperty(stageResult, 'script')?.toString()
+                def manifest = readProperty(stageResult, 'manifest')
+                if( manifest != null ) {
+                    poststopManifestJson = invokeMethod(manifest, 'toJson')?.toString()
+                }
+            }
+        }
+        catch (Exception e) {
+            log.debug("[NOMAD] Standalone stage-out generation not available, falling back to legacy poststop -- ${e.message ?: e}")
+            poststopScriptContent = null
+        }
+
+        // Fall back to legacy scripts if standalone generation failed
+        if( !prestartScriptContent ) {
+            prestartScriptContent = prestartScript()
+        }
+        if( !poststopScriptContent ) {
+            poststopScriptContent = poststopScript()
+        }
+
         final List<String> prestartCommand = lifecycleDriver == SIDECAR_DRIVER_DOCKER
-                ? ['-lc', prestartScript()]
-                : ['bash', '-lc', prestartScript()]
+                ? ['-lc', prestartScriptContent]
+                : ['bash', '-lc', prestartScriptContent]
         final List<String> poststopCommand = lifecycleDriver == SIDECAR_DRIVER_DOCKER
-                ? ['-lc', poststopScript()]
-                : ['bash', '-lc', poststopScript()]
+                ? ['-lc', poststopScriptContent]
+                : ['bash', '-lc', poststopScriptContent]
+
+        // --- build lifecycle task metadata ---
+        final Map<String, String> prestartMeta = new LinkedHashMap<>()
+        prestartMeta.put('nf.phase', 'prestart')
+        prestartMeta.put('nf.taskHash', taskRemotePath())
+        prestartMeta.put('nf.transferMode', 'sidecar')
+
+        final Map<String, String> poststopMeta = new LinkedHashMap<>()
+        poststopMeta.put('nf.phase', 'poststop')
+        poststopMeta.put('nf.taskHash', taskRemotePath())
+        poststopMeta.put('nf.transferMode', 'sidecar')
+
         final List<NomadLifecycleTaskSpec> specs = []
 
         specs << new NomadLifecycleTaskSpec(
@@ -231,7 +320,9 @@ class RcloneNomadInterop {
                 config: lifecycleConfig,
                 env: transferEnv,
                 cpu: 200,
-                memoryMb: 128
+                memoryMb: 128,
+                transferManifest: prestartManifestJson,
+                meta: prestartMeta
         )
 
         specs << new NomadLifecycleTaskSpec(
@@ -244,12 +335,83 @@ class RcloneNomadInterop {
                 config: lifecycleConfig,
                 env: transferEnv,
                 cpu: 200,
-                memoryMb: 128
+                memoryMb: 128,
+                transferManifest: poststopManifestJson,
+                meta: poststopMeta
         )
 
         submitCommand = ['bash', '-lc', sidecarMainTaskScript()]
         submitEnv = Collections.emptyMap()
         lifecycleTasks = specs
+    }
+
+    protected Map<String, Object> buildLifecycleDriverConfig(String lifecycleDriver) {
+        if( lifecycleDriver == SIDECAR_DRIVER_DOCKER ) {
+            final Map<String, Object> config = new LinkedHashMap<>()
+            config.put('image', sidecarImage)
+            config.put('entrypoint', ['sh'])
+            config.put('network_mode', 'host')
+            if( configDelivery == 'hostPath' && rcloneConfigPath ) {
+                final String mount = rcloneConfigPath + ':' + rcloneConfigPath + ':ro'
+                config.put('volumes', [mount])
+            }
+            return config
+        }
+        return Collections.emptyMap()
+    }
+
+    /**
+     * Use nf-rclone's StandaloneStageScriptGenerator to produce a complete
+     * prestart script with data staging commands and transfer manifest.
+     * Returns null if nf-rclone classes are not available.
+     */
+    protected Object generateStandaloneStageIn() {
+        final ClassLoader loader = this.class.classLoader
+        final Class generatorClass = loader.loadClass('nextflow.rclone.strategy.StandaloneStageScriptGenerator')
+        final Class rcloneConfigClass = loader.loadClass('nextflow.rclone.config.RcloneConfig')
+        final Map rcloneScope = readMap(sessionConfig, 'rclone')
+        final Object rcloneConfig = rcloneConfigClass.getMethod('fromMap', Map).invoke(null, rcloneScope)
+
+        def generator = generatorClass.getConstructor(rcloneConfigClass).newInstance(rcloneConfig)
+
+        // Collect task input files
+        Map<String, java.nio.file.Path> inputFiles = Collections.emptyMap()
+        try {
+            inputFiles = task.getInputFilesMap() ?: Collections.emptyMap()
+        }
+        catch (Exception e) {
+            log.debug("[NOMAD] Unable to retrieve task input files map: ${e.message}")
+        }
+
+        return generatorClass.getMethod('generateStageInScript', Map, String, String, String)
+                .invoke(generator, inputFiles, remoteTaskDir(), taskRemotePath(), remote)
+    }
+
+    /**
+     * Use nf-rclone's StandaloneStageScriptGenerator to produce a complete
+     * poststop script with data staging commands and transfer manifest.
+     * Returns null if nf-rclone classes are not available.
+     */
+    protected Object generateStandaloneStageOut() {
+        final ClassLoader loader = this.class.classLoader
+        final Class generatorClass = loader.loadClass('nextflow.rclone.strategy.StandaloneStageScriptGenerator')
+        final Class rcloneConfigClass = loader.loadClass('nextflow.rclone.config.RcloneConfig')
+        final Map rcloneScope = readMap(sessionConfig, 'rclone')
+        final Object rcloneConfig = rcloneConfigClass.getMethod('fromMap', Map).invoke(null, rcloneScope)
+
+        def generator = generatorClass.getConstructor(rcloneConfigClass).newInstance(rcloneConfig)
+
+        // Collect task output file names
+        List<String> outputFiles = Collections.emptyList()
+        try {
+            outputFiles = task.getOutputFilesNames() ?: Collections.emptyList()
+        }
+        catch (Exception e) {
+            log.debug("[NOMAD] Unable to retrieve task output file names: ${e.message}")
+        }
+
+        return generatorClass.getMethod('generateStageOutScript', List, String, String, String)
+                .invoke(generator, outputFiles, remoteTaskDir(), taskRemotePath(), remote)
     }
 
     protected Map<String, String> buildTransferEnv() {
@@ -340,6 +502,41 @@ class RcloneNomadInterop {
 
     protected String remoteExitFile() {
         return "${remoteTaskDir()}.exitcode"
+    }
+
+    protected String remotePoststopExitFile() {
+        return "${remoteTaskDir()}.rclone-poststop-exitcode"
+    }
+
+    protected Integer readRemotePoststopExitCode() {
+        final List<String> cmd = [
+                'rclone', 'cat',
+                '--config', rcloneConfigPath,
+                remotePoststopExitFile()
+        ]
+        final CommandResult result = runCommand(cmd)
+        if( result.exitCode != 0 ) {
+            return null
+        }
+        try {
+            String value = result.stdout?.trim()
+            return value ? Integer.parseInt(value) : null
+        }
+        catch (Exception e) {
+            return null
+        }
+    }
+
+    protected void writeLocalPoststopWarning() {
+        try {
+            Files.writeString(
+                    task.workDir.resolve('.rclone-poststop-warning'),
+                    'poststop transfer marker was not found on remote — outputs may be incomplete'
+            )
+        }
+        catch (Exception ignored) {
+            // best-effort warning
+        }
     }
 
     protected String taskRemotePath() {
@@ -710,6 +907,22 @@ exit "$_exit_code"
         }
         Object value = source.get(key)
         return value instanceof Map ? (Map)value : Collections.emptyMap()
+    }
+
+    protected static Object readProperty(Object target, String property) {
+        try {
+            return org.codehaus.groovy.runtime.InvokerHelper.getProperty(target, property)
+        } catch (Throwable ignored) {
+            return null
+        }
+    }
+
+    protected static String invokeMethod(Object target, String method) {
+        try {
+            return org.codehaus.groovy.runtime.InvokerHelper.invokeMethod(target, method, null)?.toString()
+        } catch (Throwable ignored) {
+            return null
+        }
     }
 
     static class CommandResult {

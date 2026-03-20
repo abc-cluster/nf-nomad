@@ -272,6 +272,15 @@ class JobBuilder {
                 .hook(spec.hook)
                 .sidecar(spec.sidecar)
 
+        // Build task meta from explicit meta + transfer manifest
+        Map<String, String> taskMeta = new LinkedHashMap<>()
+        if( spec.meta ) {
+            taskMeta.putAll(spec.meta)
+        }
+        if( spec.transferManifest ) {
+            taskMeta.put('nf.rclone.transferManifest', spec.transferManifest)
+        }
+
         Task task = new Task(
                 name: spec.name,
                 driver: spec.driver ?: 'raw_exec',
@@ -282,6 +291,9 @@ class JobBuilder {
                         .memoryMB(spec.memoryMb ?: 128),
                 lifecycle: lifecycle
         )
+        if( taskMeta ) {
+            task.meta(taskMeta)
+        }
         if( spec.user ) {
             task.user(spec.user)
         }

@@ -28,7 +28,7 @@ class RcloneNomadInteropSpec extends Specification {
     void 'should prepare bootstrap submit command and upload task scripts'() {
         given:
         def sessionDir = tempDir.resolve('session')
-        def workDir = tempDir.resolve('work').resolve('ab12cd34')
+        def workDir = sessionDir.resolve('ab').resolve('12cd34')
         Files.createDirectories(workDir)
         Files.writeString(workDir.resolve('.command.run'), 'echo ok\n')
         Files.writeString(workDir.resolve('.command.sh'), 'echo ok\n')
@@ -47,7 +47,7 @@ class RcloneNomadInteropSpec extends Specification {
         interop.submitCommand[0] == 'bash'
         interop.submitCommand[1] == '-c'
         interop.submitCommand[2].contains('NXF_RCLONE_REMOTE_WORKDIR')
-        interop.submitEnv.get('NXF_RCLONE_REMOTE_WORKDIR') == 'minio:work/run/ab12cd34/'
+        interop.submitEnv.get('NXF_RCLONE_REMOTE_WORKDIR') == 'minio:work/run/ab/12cd34/'
         interop.submitEnv.containsKey('NXF_RCLONE_CONFIG_B64')
         interop.commands.any { List<String> cmd ->
             cmd[0] == 'rclone' && cmd.contains('.command.*') && cmd.contains(workDir.toString())
@@ -57,10 +57,32 @@ class RcloneNomadInteropSpec extends Specification {
         rcloneConf != null
     }
 
+    void 'should preserve nextflow NN/HASH layout in remote task path when under session workdir'() {
+        given:
+        def sessionDir = tempDir.resolve('session-work')
+        def workDir = sessionDir.resolve('97').resolve('f9c8ee6cf00be6c1dd40e045c39640')
+        Files.createDirectories(workDir)
+        Files.writeString(workDir.resolve('.command.run'), 'echo ok\\n')
+        Files.writeString(workDir.resolve('.command.sh'), 'echo ok\\n')
+        writeRuntimeMetadata(sessionDir)
+
+        def task = mockTask(workDir)
+        def cfg = [rclone: [rcloneWorkDir: [enabled: true, remote: 'minio', remotePath: 'work/run', configDelivery: 'inline']]]
+        def interop = new TestInterop(task, cfg, sessionDir)
+        def expectedRemote = 'minio:work/run/97/f9c8ee6cf00be6c1dd40e045c39640/'
+
+        when:
+        interop.prepare()
+
+        then:
+        interop.submitEnv.get('NXF_RCLONE_REMOTE_WORKDIR') == expectedRemote
+        interop.commands.any { List<String> cmd -> cmd.contains(expectedRemote) }
+    }
+
     void 'should synchronize completion and materialize local exitcode'() {
         given:
         def sessionDir = tempDir.resolve('session')
-        def workDir = tempDir.resolve('work').resolve('ef56gh78')
+        def workDir = sessionDir.resolve('ef').resolve('56ab78')
         Files.createDirectories(workDir)
         Files.writeString(workDir.resolve('.command.run'), 'echo ok\n')
         Files.writeString(workDir.resolve('.command.sh'), 'echo ok\n')
@@ -84,7 +106,7 @@ class RcloneNomadInteropSpec extends Specification {
     void 'should prepare lifecycle sidecar tasks when transferMode is sidecar'() {
         given:
         def sessionDir = tempDir.resolve('session-sidecar')
-        def workDir = tempDir.resolve('work').resolve('sc12ab34')
+        def workDir = sessionDir.resolve('9a').resolve('bc12ab34')
         Files.createDirectories(workDir)
         Files.writeString(workDir.resolve('.command.run'), 'echo ok\\n')
         Files.writeString(workDir.resolve('.command.sh'), 'echo ok\\n')
@@ -115,7 +137,7 @@ class RcloneNomadInteropSpec extends Specification {
     void 'should prepare docker lifecycle sidecars when sidecarDriver is docker'() {
         given:
         def sessionDir = tempDir.resolve('session-sidecar-docker')
-        def workDir = tempDir.resolve('work').resolve('sd12ab34')
+        def workDir = sessionDir.resolve('9b').resolve('cd12ab34')
         Files.createDirectories(workDir)
         Files.writeString(workDir.resolve('.command.run'), 'echo ok\\n')
         Files.writeString(workDir.resolve('.command.sh'), 'echo ok\\n')
@@ -151,7 +173,7 @@ class RcloneNomadInteropSpec extends Specification {
     void 'should reject docker lifecycle sidecars without sidecarImage'() {
         given:
         def sessionDir = tempDir.resolve('session-sidecar-docker-missing-image')
-        def workDir = tempDir.resolve('work').resolve('sm12ab34')
+        def workDir = sessionDir.resolve('9c').resolve('de12ab34')
         Files.createDirectories(workDir)
         Files.writeString(workDir.resolve('.command.run'), 'echo ok\\n')
         Files.writeString(workDir.resolve('.command.sh'), 'echo ok\\n')
@@ -178,7 +200,7 @@ class RcloneNomadInteropSpec extends Specification {
     void 'should use hostPath config delivery by default'() {
         given:
         def sessionDir = tempDir.resolve('session-hostpath')
-        def workDir = tempDir.resolve('work').resolve('hp12ab34')
+        def workDir = sessionDir.resolve('a1').resolve('b2ab34cd')
         Files.createDirectories(workDir)
         Files.writeString(workDir.resolve('.command.run'), 'echo ok\n')
         Files.writeString(workDir.resolve('.command.sh'), 'echo ok\n')
@@ -199,7 +221,7 @@ class RcloneNomadInteropSpec extends Specification {
     void 'should use hostPath config delivery by default in sidecar mode'() {
         given:
         def sessionDir = tempDir.resolve('session-hostpath-sidecar')
-        def workDir = tempDir.resolve('work').resolve('hp12sc34')
+        def workDir = sessionDir.resolve('a2').resolve('b3cd45ef')
         Files.createDirectories(workDir)
         Files.writeString(workDir.resolve('.command.run'), 'echo ok\\n')
         Files.writeString(workDir.resolve('.command.sh'), 'echo ok\\n')
@@ -227,7 +249,7 @@ class RcloneNomadInteropSpec extends Specification {
     void 'should return null when remote exitcode is not available before timeout'() {
         given:
         def sessionDir = tempDir.resolve('session-timeout')
-        def workDir = tempDir.resolve('work').resolve('zz99yy88')
+        def workDir = sessionDir.resolve('b1').resolve('c2d3e4f5')
         Files.createDirectories(workDir)
         Files.writeString(workDir.resolve('.command.run'), 'echo ok\n')
         Files.writeString(workDir.resolve('.command.sh'), 'echo ok\n')
@@ -250,7 +272,7 @@ class RcloneNomadInteropSpec extends Specification {
     void 'should gracefully return null copy strategy when nf-rclone classes are unavailable'() {
         given:
         def sessionDir = tempDir.resolve('session-copy-strategy')
-        def workDir = tempDir.resolve('work').resolve('xy12zz34')
+        def workDir = sessionDir.resolve('c1').resolve('d2e3f4a5')
         Files.createDirectories(workDir)
         Files.writeString(workDir.resolve('.command.run'), 'echo ok\n')
         writeRuntimeMetadata(sessionDir)
@@ -269,7 +291,7 @@ class RcloneNomadInteropSpec extends Specification {
     void 'should use metadata-only copy command when syncBack is none'() {
         given:
         def sessionDir = tempDir.resolve('session-none')
-        def workDir = tempDir.resolve('work').resolve('no12ab34')
+        def workDir = sessionDir.resolve('d1').resolve('e2f3a4b5')
         Files.createDirectories(workDir)
         Files.writeString(workDir.resolve('.command.run'), 'echo ok\n')
         Files.writeString(workDir.resolve('.command.sh'), 'echo ok\n')
@@ -292,6 +314,28 @@ class RcloneNomadInteropSpec extends Specification {
                     cmd.contains('.exitcode') &&
                     cmd.contains('.command.*')
         }
+    }
+
+    void 'should fail fast when task workdir is outside session workdir'() {
+        given:
+        def sessionDir = tempDir.resolve('session-strict')
+        Files.createDirectories(sessionDir)
+        def workDir = tempDir.resolve('outside').resolve('ab').resolve('12cd34')
+        Files.createDirectories(workDir)
+        Files.writeString(workDir.resolve('.command.run'), 'echo ok\n')
+        Files.writeString(workDir.resolve('.command.sh'), 'echo ok\n')
+        writeRuntimeMetadata(sessionDir)
+
+        def task = mockTask(workDir)
+        def cfg = [rclone: [rcloneWorkDir: [enabled: true, remote: 'minio', remotePath: 'work/run']]]
+        def interop = new TestInterop(task, cfg, sessionDir)
+
+        when:
+        interop.prepare()
+
+        then:
+        def e = thrown(nextflow.exception.ProcessSubmitException)
+        e.message.contains('nested under session workDir')
     }
 
     private TaskRun mockTask(Path workDir) {

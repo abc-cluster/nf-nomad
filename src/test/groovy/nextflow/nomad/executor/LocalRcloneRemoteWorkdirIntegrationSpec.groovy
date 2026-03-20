@@ -63,7 +63,7 @@ class LocalRcloneRemoteWorkdirIntegrationSpec extends Specification {
         config = new NomadConfig(client: clientOpts, jobs: jobsOpts)
         service = new NomadService(config)
         sessionWorkDir = Files.createTempDirectory('nf-nomad-rclone-session')
-        localWorkRoot = Files.createTempDirectory('nf-nomad-rclone-work')
+        localWorkRoot = sessionWorkDir
         writeRuntimeMetadata(sessionWorkDir, rcloneConfPath)
     }
 
@@ -99,8 +99,8 @@ class LocalRcloneRemoteWorkdirIntegrationSpec extends Specification {
 
     void 'should execute remote-workdir bootstrap flow with hostPath config delivery'() {
         given:
-        def taskHash = "hp-${UUID.randomUUID().toString().take(8)}"
-        def workDir = Files.createDirectories(localWorkRoot.resolve(taskHash))
+        def taskHash = UUID.randomUUID().toString().replace('-', '')
+        def workDir = createTaskWorkDir(taskHash)
         writeCommandFiles(workDir, "result-hostpath.txt", "hostpath")
         def task = mockTask(workDir, taskHash, "result-hostpath.txt")
         def sessionConfig = rcloneSessionConfig('hostPath')
@@ -116,13 +116,13 @@ class LocalRcloneRemoteWorkdirIntegrationSpec extends Specification {
         Files.exists(workDir.resolve(TaskRun.CMD_EXIT))
         Files.readString(workDir.resolve(TaskRun.CMD_EXIT)).trim() == '0'
         Files.exists(workDir.resolve('result-hostpath.txt'))
-        remoteExitCode(taskHash) == '0'
+        remoteExitCode(workDir) == '0'
     }
 
     void 'should execute remote-workdir bootstrap flow with inline config delivery'() {
         given:
-        def taskHash = "in-${UUID.randomUUID().toString().take(8)}"
-        def workDir = Files.createDirectories(localWorkRoot.resolve(taskHash))
+        def taskHash = UUID.randomUUID().toString().replace('-', '')
+        def workDir = createTaskWorkDir(taskHash)
         writeCommandFiles(workDir, "result-inline.txt", "inline")
         def task = mockTask(workDir, taskHash, "result-inline.txt")
         def sessionConfig = rcloneSessionConfig('inline')
@@ -138,7 +138,7 @@ class LocalRcloneRemoteWorkdirIntegrationSpec extends Specification {
         Files.exists(workDir.resolve(TaskRun.CMD_EXIT))
         Files.readString(workDir.resolve(TaskRun.CMD_EXIT)).trim() == '0'
         Files.exists(workDir.resolve('result-inline.txt'))
-        remoteExitCode(taskHash) == '0'
+        remoteExitCode(workDir) == '0'
     }
 
     private Map<String, Object> rcloneSessionConfig(String configDelivery) {
@@ -203,8 +203,15 @@ class LocalRcloneRemoteWorkdirIntegrationSpec extends Specification {
         return false
     }
 
-    private String remoteExitCode(String taskHash) {
-        def remoteExit = "${rcloneRemote}:${normalizePath(runPrefix)}${taskHash}/.exitcode"
+    private Path createTaskWorkDir(String taskHash) {
+        def prefix = taskHash.substring(0, 2)
+        def suffix = taskHash.substring(2)
+        return Files.createDirectories(localWorkRoot.resolve(prefix).resolve(suffix))
+    }
+
+    private String remoteExitCode(Path taskWorkDir) {
+        def relative = localWorkRoot.relativize(taskWorkDir).toString().replace('\\', '/')
+        def remoteExit = "${rcloneRemote}:${normalizePath(runPrefix)}${relative}/.exitcode"
         def result = runCommand(['rclone', 'cat', '--config', rcloneConfPath, remoteExit])
         return result.exitCode == 0 ? result.stdout.trim() : null
     }

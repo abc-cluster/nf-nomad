@@ -335,11 +335,26 @@ class RcloneNomadInterop {
 
     protected String remoteTaskDir() {
         String base = remotePath.endsWith('/') ? remotePath : "${remotePath}/"
-        return "${remote}:${base}${taskHash()}/"
+        return "${remote}:${base}${taskRemotePath()}/"
     }
 
     protected String remoteExitFile() {
         return "${remoteTaskDir()}.exitcode"
+    }
+
+    protected String taskRemotePath() {
+        String fromSession = relativePathFromSessionWorkDir(task.workDir, sessionWorkDir)
+        if( !fromSession ) {
+            throw new ProcessSubmitException(
+                    "[NOMAD] nf-rclone interop requires task workDir `${task.workDir}` to be nested under session workDir `${sessionWorkDir}`"
+            )
+        }
+        if( !isNextflowWorkPathLayout(fromSession) ) {
+            throw new ProcessSubmitException(
+                    "[NOMAD] nf-rclone interop requires Nextflow workDir layout `NN/HASH`; found `${fromSession}`"
+            )
+        }
+        return fromSession
     }
 
     protected String taskHash() {
@@ -352,6 +367,47 @@ class RcloneNomadInterop {
             return value
         }
         throw new ProcessSubmitException('[NOMAD] Unable to determine task hash for nf-rclone interop')
+    }
+
+    protected static String relativePathFromSessionWorkDir(Path taskWorkDir, Path sessionWorkDir) {
+        if( taskWorkDir == null || sessionWorkDir == null ) {
+            return null
+        }
+        try {
+            Path taskAbs = taskWorkDir.toAbsolutePath().normalize()
+            Path sessionAbs = sessionWorkDir.toAbsolutePath().normalize()
+            if( !taskAbs.startsWith(sessionAbs) ) {
+                return null
+            }
+            Path relative = sessionAbs.relativize(taskAbs)
+            return normalizeRelativePath(relative)
+        }
+        catch (Exception ignored) {
+            return null
+        }
+    }
+
+
+    protected static String normalizeRelativePath(Path path) {
+        if( path == null ) {
+            return null
+        }
+        String value = path.toString().replace('\\' as char, '/' as char)
+        value = value.replaceAll('^/+', '').replaceAll('/+$', '')
+        if( !value ) {
+            return null
+        }
+        if( value == '..' || value.startsWith('../') || value.contains('/../') ) {
+            return null
+        }
+        return value
+    }
+
+    protected static boolean isNextflowWorkPathLayout(String value) {
+        if( !value ) {
+            return false
+        }
+        return value ==~ /[0-9a-fA-F]{2}\/[0-9a-fA-F]+/
     }
 
 
@@ -379,26 +435,26 @@ class RcloneNomadInterop {
 set -euo pipefail
 TASK_DIR="$${NOMAD_ALLOC_DIR:-$${NOMAD_TASK_DIR:-$PWD}}/nf-rclone-task"
 cd "$TASK_DIR"
-if [ ! -f .command.sh ]; then
-  if [ ! -f .command.run ]; then
-    echo "[NOMAD] Missing .command.run/.command.sh in sidecar task directory: $TASK_DIR" >&2
-    exit 127
-  fi
-fi
 if [ -f .command.run ]; then
-  chmod +x .command.run || true
+  _task_script='.command.run'
+elif [ -f .command.sh ]; then
+  _task_script='.command.sh'
 else
-  chmod +x .command.sh || true
+  echo \"[NOMAD] Missing .command.run/.command.sh in sidecar task directory: $TASK_DIR\" >&2
+  exit 127
 fi
 set +e
-if [ -f .command.run ]; then
-  bash .command.run > .command.out 2> .command.err
+unset NXF_CHDIR 2>/dev/null || true
+if [ \"$_task_script\" = '.command.run' ]; then
+  bash .command.run
 else
   bash .command.sh > .command.out 2> .command.err
 fi
 _exit_code=$?
 set -e
-printf '%s' "$_exit_code" > .exitcode
+if [ ! -f .exitcode ]; then
+  printf '%s' \"$_exit_code\" > .exitcode
+fi
 exit "$_exit_code"
 '''.stripIndent()
     }
@@ -430,9 +486,28 @@ if [ -z "$${NXF_RCLONE_CONFIG:-}" ]; then
 fi
 
 rclone copy --config "$NXF_RCLONE_CONFIG" --include '.command.*' "$${NXF_RCLONE_REMOTE_WORKDIR}/" "$TASK_DIR/"
-chmod -R a+rwX "$TASK_DIR" || true
-chmod +x "$TASK_DIR/.command.run" || true
-chmod +x "$TASK_DIR/.command.sh" || true
+
+if [ -f \"$TASK_DIR/.command.run\" ]; then
+  awk '
+    {
+      gsub(/\\/[^[:space:]]*\\/\\.command\\.run/, \".command.run\")
+      gsub(/\\/[^[:space:]]*\\/\\.command\\.sh/, \".command.sh\")
+      gsub(/\\/[^[:space:]]*\\/\\.command\\.begin/, \".command.begin\")
+      gsub(/\\/[^[:space:]]*\\/\\.command\\.trace/, \".command.trace\")
+      gsub(/\\/[^[:space:]]*\\/\\.exitcode/, \".exitcode\")
+      print
+    }
+  ' \"$TASK_DIR/.command.run\" > \"$TASK_DIR/.command.run.patched\"
+  mv \"$TASK_DIR/.command.run.patched\" \"$TASK_DIR/.command.run\"
+fi
+chmod 777 "$TASK_DIR" 2>/dev/null || true
+for f in .command.run .command.sh .command.in .command.stub; do
+  if [ -e "$TASK_DIR/$f" ]; then
+    chmod 755 \"$TASK_DIR/$f\" 2>/dev/null || true
+  fi
+done
+touch "$TASK_DIR/.command.out" "$TASK_DIR/.command.err" "$TASK_DIR/.exitcode" 2>/dev/null || true
+chmod 666 "$TASK_DIR/.command.out" "$TASK_DIR/.command.err" "$TASK_DIR/.exitcode" 2>/dev/null || true
 '''.stripIndent()
     }
 
@@ -492,8 +567,33 @@ if [ -z "$${NXF_RCLONE_CONFIG:-}" ]; then
 fi
 
 rclone copy --config "$NXF_RCLONE_CONFIG" --include '.command.*' "$${NXF_RCLONE_REMOTE_WORKDIR}/" ./
+
+if [ -f .command.run ]; then
+  awk '
+    {
+      gsub(/\\/[^[:space:]]*\\/\\.command\\.run/, \".command.run\")
+      gsub(/\\/[^[:space:]]*\\/\\.command\\.sh/, \".command.sh\")
+      gsub(/\\/[^[:space:]]*\\/\\.command\\.begin/, \".command.begin\")
+      gsub(/\\/[^[:space:]]*\\/\\.command\\.trace/, \".command.trace\")
+      gsub(/\\/[^[:space:]]*\\/\\.exitcode/, \".exitcode\")
+      print
+    }
+  ' .command.run > .command.run.patched
+  mv .command.run.patched .command.run
+  chmod 755 .command.run 2>/dev/null || true
+fi
+
+if [ -f .command.run ]; then
+  _task_script='.command.run'
+elif [ -f .command.sh ]; then
+  _task_script='.command.sh'
+else
+  echo \"[NOMAD] Missing .command.run/.command.sh in bootstrap task directory: $TASK_DIR\" >&2
+  exit 127
+fi
 set +e
-bash .command.run
+unset NXF_CHDIR 2>/dev/null || true
+bash \"$_task_script\"
 _exit_code=$?
 set -e
 printf '%s' "$_exit_code" > .exitcode

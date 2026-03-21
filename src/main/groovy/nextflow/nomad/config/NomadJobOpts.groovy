@@ -70,6 +70,8 @@ class NomadJobOpts{
 
     NomadSecretOpts secretOpts
 
+    String driver
+
     NomadJobOpts(Map nomadJobOpts, Map<String,String> env=null){
         assert nomadJobOpts!=null
 
@@ -77,6 +79,8 @@ class NomadJobOpts{
         if( env ) {
             sysEnv.putAll(env)
         }
+
+        driver = nomadJobOpts.driver?.toString() ?: "docker"
 
         deleteOnCompletion = nomadJobOpts.containsKey("deleteOnCompletion") ?
                 nomadJobOpts.deleteOnCompletion : true

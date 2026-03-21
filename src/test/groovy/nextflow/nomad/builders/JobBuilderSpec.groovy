@@ -17,6 +17,7 @@
 package nextflow.nomad.builders
 
 
+import io.nomadproject.client.model.Task
 import nextflow.executor.Executor
 import nextflow.executor.ExecutorConfig
 import nextflow.nomad.config.NomadJobOpts
@@ -156,6 +157,142 @@ class JobBuilderSpec extends Specification {
         task.config.image == null
         task.config.privileged == null
         task.env == env
+    }
+
+
+    def "test createLifecycleTask creates prestart task"() {
+        when:
+        def task = JobBuilder.createLifecycleTask(
+                "stage-in",
+                JobBuilder.LIFECYCLE_HOOK_PRESTART,
+                "raw_exec",
+                [command: "/usr/bin/rclone", args: ["copy", "s3://bucket/input", "/scratch/work"]],
+                ["RCLONE_CONFIG": "/etc/rclone.conf"],
+        )
+
+        then:
+        task.name == "stage-in"
+        task.driver == "raw_exec"
+        task.config.command == "/usr/bin/rclone"
+        task.config.args == ["copy", "s3://bucket/input", "/scratch/work"]
+        task.env["RCLONE_CONFIG"] == "/etc/rclone.conf"
+        task.lifecycle.hook == "prestart"
+        task.lifecycle.sidecar == false
+    }
+
+
+    def "test createLifecycleTask creates poststop task"() {
+        when:
+        def task = JobBuilder.createLifecycleTask(
+                "stage-out",
+                JobBuilder.LIFECYCLE_HOOK_POSTSTOP,
+                "raw_exec",
+                [command: "/usr/bin/rclone", args: ["copy", "/scratch/work/output", "s3://bucket/output"]],
+        )
+
+        then:
+        task.name == "stage-out"
+        task.driver == "raw_exec"
+        task.lifecycle.hook == "poststop"
+        task.lifecycle.sidecar == false
+    }
+
+
+    def "test createLifecycleTask rejects invalid hook"() {
+        when:
+        JobBuilder.createLifecycleTask(
+                "bad-task",
+                "invalid_hook",
+                "raw_exec",
+                [command: "echo", args: ["hello"]],
+        )
+
+        then:
+        thrown(IllegalArgumentException)
+    }
+
+
+    def "test createLifecycleTask supports sidecar mode"() {
+        when:
+        def task = JobBuilder.createLifecycleTask(
+                "log-shipper",
+                JobBuilder.LIFECYCLE_HOOK_PRESTART,
+                "raw_exec",
+                [command: "/usr/bin/tail", args: ["-f", "/var/log/app.log"]],
+                [:],
+                true,
+        )
+
+        then:
+        task.lifecycle.hook == "prestart"
+        task.lifecycle.sidecar == true
+    }
+
+
+    def "test createTaskGroup includes lifecycle tasks"() {
+        given:
+        def jobOpts = Mock(NomadJobOpts) {
+            driver >> "pbs"
+        }
+        def taskRun = Mock(TaskRun)
+        taskRun.container >> null
+        taskRun.workDir >> new File("/scratch/work/ab/cd1234").toPath()
+        taskRun.getConfig() >> [cpus: 2, memory: "1GB"]
+
+        def prestartTask = JobBuilder.createLifecycleTask(
+                "stage-in",
+                JobBuilder.LIFECYCLE_HOOK_PRESTART,
+                "raw_exec",
+                [command: "rclone", args: ["copy", "s3://bucket/in", "/scratch/work"]],
+        )
+        def poststopTask = JobBuilder.createLifecycleTask(
+                "stage-out",
+                JobBuilder.LIFECYCLE_HOOK_POSTSTOP,
+                "raw_exec",
+                [command: "rclone", args: ["copy", "/scratch/work/out", "s3://bucket/out"]],
+        )
+
+        when:
+        def taskGroup = JobBuilder.createTaskGroup(
+                taskRun, ["bash", ".command.run"], ["KEY": "val"], jobOpts,
+                [prestartTask, poststopTask] as List<Task>,
+        )
+
+        then:
+        taskGroup.name == "nf-taskgroup"
+        taskGroup.tasks.size() == 3
+
+        // Lifecycle tasks come first, main task last
+        taskGroup.tasks[0].name == "stage-in"
+        taskGroup.tasks[0].driver == "raw_exec"
+        taskGroup.tasks[0].lifecycle.hook == "prestart"
+
+        taskGroup.tasks[1].name == "stage-out"
+        taskGroup.tasks[1].driver == "raw_exec"
+        taskGroup.tasks[1].lifecycle.hook == "poststop"
+
+        // Main task
+        taskGroup.tasks[2].name == "nf-task"
+        taskGroup.tasks[2].driver == "pbs"
+        taskGroup.tasks[2].lifecycle == null
+    }
+
+
+    def "test createTaskGroup without lifecycle tasks has single main task"() {
+        given:
+        def jobOpts = Mock(NomadJobOpts)
+        def taskRun = Mock(TaskRun)
+        taskRun.container >> "ubuntu"
+        taskRun.workDir >> new File("/test/workdir").toPath()
+        taskRun.getConfig() >> [cpus: 1, memory: "512MB"]
+
+        when:
+        def taskGroup = JobBuilder.createTaskGroup(taskRun, ["bash", "-c", "echo"], ["K": "V"], jobOpts)
+
+        then:
+        taskGroup.tasks.size() == 1
+        taskGroup.tasks[0].name == "nf-task"
+        taskGroup.tasks[0].lifecycle == null
     }
 
 }

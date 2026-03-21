@@ -90,6 +90,24 @@ class NomadService implements Closeable{
 
 
     String submitTask(String id, TaskRun task, List<String> args, Map<String, String> env, Path saveJsonPath = null) {
+        return submitTask(id, task, args, env, [] as List<Task>, saveJsonPath)
+    }
+
+    /**
+     * Submit a task with optional lifecycle tasks (prestart/poststop).
+     * Lifecycle tasks are included in the task group alongside the main task.
+     * This API allows plugins (e.g. nf-rclone) to inject data-staging tasks.
+     *
+     * @param id              job identifier
+     * @param task            the Nextflow task
+     * @param args            command arguments
+     * @param env             environment variables
+     * @param lifecycleTasks  lifecycle tasks to include (prestart/poststop, typically raw_exec)
+     * @param saveJsonPath    optional debug dump path
+     * @return evaluation ID from Nomad
+     */
+    String submitTask(String id, TaskRun task, List<String> args, Map<String, String> env,
+                      List<Task> lifecycleTasks, Path saveJsonPath = null) {
         long startTime = System.currentTimeMillis()
         NomadTaskOptionsResolver.validate(task)
 
@@ -99,7 +117,8 @@ class NomadService implements Closeable{
                 .withType("batch")
                 .withDatacenters(this.config.jobOpts().datacenters)
                 .withNamespace(this.config.jobOpts().namespace)
-                .withTaskGroups([JobBuilder.createTaskGroup(task, args, env, this.config.jobOpts())])
+                .withTaskGroups([JobBuilder.createTaskGroup(task, args, env, this.config.jobOpts(),
+                        lifecycleTasks ?: ([] as List<Task>))])
                 .build()
 
         JobBuilder.assignDatacenters(task, job)

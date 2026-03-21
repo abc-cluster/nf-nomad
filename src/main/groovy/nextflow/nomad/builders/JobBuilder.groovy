@@ -27,6 +27,7 @@ import io.nomadproject.client.model.ReschedulePolicy
 import io.nomadproject.client.model.RestartPolicy
 import io.nomadproject.client.model.Resources
 import io.nomadproject.client.model.RequestedDevice
+import io.nomadproject.client.model.TaskLifecycle
 import io.nomadproject.client.model.Template
 import io.nomadproject.client.model.VolumeMount
 import io.nomadproject.client.model.VolumeRequest
@@ -202,15 +203,77 @@ class JobBuilder {
         }
     }
 
+    /** Nomad lifecycle hook constants */
+    static final String LIFECYCLE_HOOK_PRESTART  = "prestart"
+    static final String LIFECYCLE_HOOK_POSTSTART = "poststart"
+    static final String LIFECYCLE_HOOK_POSTSTOP  = "poststop"
+
+    /**
+     * Create a Nomad lifecycle task (prestart, poststart, or poststop).
+     * Lifecycle tasks run on the Nomad client node using the specified driver
+     * (typically "raw_exec") and are NOT dispatched to PBS/SLURM.
+     *
+     * @param name     unique task name within the task group (e.g. "stage-in", "stage-out")
+     * @param hook     lifecycle hook: "prestart", "poststart", or "poststop"
+     * @param driver   Nomad task driver (e.g. "raw_exec")
+     * @param config   driver-specific config map (command, args, etc.)
+     * @param env      environment variables for the task
+     * @param sidecar  if true, task runs for the lifetime of the allocation (only valid with prestart/poststart)
+     * @return a fully configured Task with lifecycle block set
+     */
+    static Task createLifecycleTask(String name, String hook, String driver,
+                                    Map<String, Object> config, Map<String, String> env = [:],
+                                    boolean sidecar = false) {
+        if (!(hook in [LIFECYCLE_HOOK_PRESTART, LIFECYCLE_HOOK_POSTSTART, LIFECYCLE_HOOK_POSTSTOP])) {
+            throw new IllegalArgumentException("Invalid lifecycle hook '${hook}'; must be one of: prestart, poststart, poststop")
+        }
+
+        def lifecycle = new TaskLifecycle()
+        lifecycle.hook = hook
+        lifecycle.sidecar = sidecar
+
+        def task = new Task(
+                name: name,
+                driver: driver,
+                config: config,
+                env: env ?: [:],
+                lifecycle: lifecycle,
+        )
+        return task
+    }
+
     static TaskGroup createTaskGroup(TaskRun taskRun, List<String> args, Map<String, String>env, NomadJobOpts jobOpts){
+        return createTaskGroup(taskRun, args, env, jobOpts, [] as List<Task>)
+    }
+
+    /**
+     * Create a task group with the main task and optional lifecycle tasks.
+     *
+     * @param taskRun       the Nextflow task
+     * @param args          command arguments for the main task
+     * @param env           environment variables for the main task
+     * @param jobOpts       Nomad job options
+     * @param lifecycleTasks  additional lifecycle tasks (prestart/poststop) to include in the group
+     * @return a configured TaskGroup
+     */
+    static TaskGroup createTaskGroup(TaskRun taskRun, List<String> args, Map<String, String>env,
+                                     NomadJobOpts jobOpts, List<Task> lifecycleTasks){
         final ReschedulePolicy taskReschedulePolicy  = resolveReschedulePolicy(taskRun, jobOpts)
         final RestartPolicy taskRestartPolicy  = resolveRestartPolicy(taskRun, jobOpts)
         final List<JobVolume> volumeSpecs = resolveVolumeSpecs(taskRun, jobOpts)
 
-        def task = createTask(taskRun, args, env, jobOpts, volumeSpecs)
+        def mainTask = createTask(taskRun, args, env, jobOpts, volumeSpecs)
+
+        // Combine lifecycle tasks (prestart first, then main, then poststop-ordered ones)
+        def allTasks = [] as List<Task>
+        if (lifecycleTasks) {
+            allTasks.addAll(lifecycleTasks)
+        }
+        allTasks.add(mainTask)
+
         def taskGroup = new TaskGroup(
                 name: "nf-taskgroup",
-                tasks: [ task ],
+                tasks: allTasks,
                 reschedulePolicy: taskReschedulePolicy,
                 restartPolicy: taskRestartPolicy
         )

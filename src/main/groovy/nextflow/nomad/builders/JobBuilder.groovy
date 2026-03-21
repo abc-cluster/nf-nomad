@@ -32,6 +32,7 @@ import io.nomadproject.client.model.Template
 import io.nomadproject.client.model.VolumeMount
 import io.nomadproject.client.model.VolumeRequest
 import nextflow.nomad.config.NomadJobOpts
+import nextflow.nomad.executor.NomadExecutor
 import nextflow.nomad.executor.NomadLifecycleTaskSpec
 import nextflow.nomad.executor.NomadTaskOptionsResolver
 import nextflow.nomad.executor.TaskDirectives
@@ -309,7 +310,7 @@ class JobBuilder {
         final workingDir = task.workDir.toAbsolutePath().toString()
         final taskResources = getResources(task, jobOpts)
 
-        def taskConfig = (driver == "docker")
+        def taskConfig = NomadExecutor.isTaskDriverContainerNative(driver)
                 ? buildDockerConfig(task, args, jobOpts, workingDir)
                 : buildHpcConfig(task, args, workingDir, taskResources)
 
@@ -326,7 +327,7 @@ class JobBuilder {
             taskDef.shutdownDelay(shutdownDelay)
         }
 
-        if( driver == "docker" ) {
+        if( NomadExecutor.isTaskDriverContainerNative(driver) ) {
             volumes(task, taskDef, workingDir, jobOpts, volumeSpecs)
         }
         affinity(task, taskDef, jobOpts)
@@ -346,7 +347,9 @@ class JobBuilder {
     }
 
     /**
-     * Build task config for Docker driver (original behavior).
+     * Build task config for container-native Nomad drivers (docker, podman).
+     * These drivers manage the container lifecycle: image pull, volume mounts,
+     * container creation, and process execution.
      */
     private static Map<String, Object> buildDockerConfig(TaskRun task, List<String> args, NomadJobOpts jobOpts, String workingDir) {
         return [

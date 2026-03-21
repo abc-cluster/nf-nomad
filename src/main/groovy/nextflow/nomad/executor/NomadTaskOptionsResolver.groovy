@@ -30,7 +30,7 @@ class NomadTaskOptionsResolver {
     private static final Set<String> SUPPORTED_AFFINITY_OPTIONS = ["attribute", "operator", "value", "weight"] as Set<String>
     private static final Set<String> SUPPORTED_VOLUME_OPTIONS = ["type", "name", "path", "workDir", "readOnly"] as Set<String>
 
-    private static final Set<String> SUPPORTED_DRIVER_VALUES = ["docker", "pbs", "slurm", "raw_exec", "exec"] as Set<String>
+    private static final Set<String> SUPPORTED_DRIVER_VALUES = ["docker", "podman", "pbs", "slurm", "raw_exec", "exec"] as Set<String>
 
     private static final Set<String> SUPPORTED_OPTIONS = [
             DRIVER,

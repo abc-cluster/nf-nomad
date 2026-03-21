@@ -366,4 +366,100 @@ class JobBuilderSpec extends Specification {
         nomadTask.config.image == null
         nomadTask.config.privileged == null
     }
+
+    def "test mixed-driver: same pipeline produces docker and hpc configs"() {
+        given: 'global jobOpts with docker as default'
+        def dockerJobOpts = Mock(NomadJobOpts) {
+            driver >> "docker"
+        }
+
+        and: 'a cloud task using docker (container image set)'
+        def cloudTaskRun = Mock(TaskRun) {
+            container >> "ubuntu:22.04"
+            workDir >> new File("/data/work/ab/cloud1").toPath()
+            getConfig() >> [cpus: 2, memory: "4 GB"]
+        }
+
+        and: 'an HPC task overriding to pbs via per-process nomadOptions'
+        def hpcJobOpts = Mock(NomadJobOpts) {
+            driver >> "pbs"
+        }
+        def hpcTaskConfig = new TaskConfig([
+                queue: 'batch',
+                time: '8h',
+                cpus: 16,
+                memory: '64 GB',
+        ])
+        def hpcTaskRun = Mock(TaskRun) {
+            workDir >> new File("/scratch/work/ab/hpc1").toPath()
+            getConfig() >> hpcTaskConfig
+            processor >> Mock(TaskProcessor) {
+                getExecutor() >> Mock(Executor) {
+                    getConfig() >> Mock(ExecutorConfig)
+                }
+            }
+        }
+
+        when: 'creating tasks for both'
+        def cloudTask = JobBuilder.createTask(cloudTaskRun, ["bash", "/data/work/ab/cloud1/.command.run"], ["ENV": "1"], dockerJobOpts)
+        def hpcTask = JobBuilder.createTask(hpcTaskRun, ["bash", ".command.run"], ["ENV": "1"], hpcJobOpts)
+
+        then: 'cloud task uses docker driver with image'
+        cloudTask.driver == "docker"
+        cloudTask.config.image == "ubuntu:22.04"
+        cloudTask.config.privileged == true
+        cloudTask.config.work_dir == "/data/work/ab/cloud1"
+
+        and: 'hpc task uses pbs driver with HPC config'
+        hpcTask.driver == "pbs"
+        hpcTask.config.work_dir == "/scratch/work/ab/hpc1"
+        hpcTask.config.queue == "batch"
+        hpcTask.config.walltime == "08:00:00"
+        hpcTask.config.cpus_per_task == 16
+        hpcTask.config.memory == 65536
+        hpcTask.config.image == null
+        hpcTask.config.privileged == null
+
+        and: 'both have standard fields'
+        cloudTask.config.command == "bash"
+        hpcTask.config.command == "bash"
+    }
+
+    def "test mixed-driver: slurm task produces correct HPC config"() {
+        given:
+        def jobOpts = Mock(NomadJobOpts) {
+            driver >> "slurm"
+        }
+        def taskConfig = new TaskConfig([
+                queue: 'gpu-partition',
+                time: '12h',
+                cpus: 8,
+                memory: '32 GB',
+                clusterOptions: '--gres=gpu:2 --exclusive',
+        ])
+        def taskRun = Mock(TaskRun) {
+            workDir >> new File("/scratch/work/cd/ef5678").toPath()
+            getConfig() >> taskConfig
+            processor >> Mock(TaskProcessor) {
+                getExecutor() >> Mock(Executor) {
+                    getConfig() >> Mock(ExecutorConfig) {
+                        getExecConfigProp('nomad', 'account', null) >> "hpc-account"
+                    }
+                }
+            }
+        }
+
+        when:
+        def task = JobBuilder.createTask(taskRun, ["bash", ".command.run"], [:], jobOpts)
+
+        then:
+        task.driver == "slurm"
+        task.config.queue == "gpu-partition"
+        task.config.walltime == "12:00:00"
+        task.config.cpus_per_task == 8
+        task.config.memory == 32768
+        task.config.account == "hpc-account"
+        task.config.extra_args == ["--gres=gpu:2", "--exclusive"]
+        task.config.image == null
+    }
 }

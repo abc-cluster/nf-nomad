@@ -20,6 +20,7 @@ import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 import nextflow.executor.Executor
 import nextflow.fusion.FusionHelper
+import nextflow.nomad.builders.JobBuilder
 import nextflow.nomad.config.NomadConfig
 import nextflow.processor.TaskHandler
 import nextflow.processor.TaskMonitor
@@ -41,6 +42,20 @@ class NomadExecutor extends Executor implements ExtensionPoint {
 
     private NomadService service
     private NomadConfig nomadConfig
+
+    /**
+     * Nomad task drivers that natively manage the container lifecycle.
+     * When a driver is in this set, Nomad pulls the image, creates the container,
+     * mounts volumes, and manages the container process directly.
+     * Nextflow does NOT wrap .command.run with container commands (e.g. docker run, singularity exec).
+     *
+     * Drivers NOT in this set (pbs, slurm, raw_exec, exec) rely on Nextflow's
+     * native .command.run script generation for container wrapping — enabling
+     * singularity, apptainer, or bare-metal execution.
+     */
+    static final Set<String> CONTAINER_NATIVE_DRIVERS = Collections.unmodifiableSet(
+            ['docker', 'podman'] as Set<String>
+    )
 
     @Override
     protected void register() {
@@ -78,14 +93,52 @@ class NomadExecutor extends Executor implements ExtensionPoint {
     }
 
     /**
-     * Returns true when the executor manages containers natively (i.e. Nomad docker driver).
-     * This is per-executor, not per-task — for mixed-driver pipelines (docker + pbs/slurm),
-     * the global nomad.jobs.driver determines the default. Per-process driver overrides
-     * via nomadOptions affect the Nomad job definition but not Nextflow's script generation.
-     * Cross-node-pool container orchestration is the abc-control-plane's responsibility.
+     * Checks whether a given Nomad task driver natively manages the container lifecycle.
+     * Container-native drivers (docker, podman) handle image pulling, volume mounts,
+     * and container creation — Nextflow delegates container management entirely.
+     * Non-container-native drivers (pbs, slurm, raw_exec, exec) require Nextflow
+     * to generate container-wrapped .command.run scripts itself.
+     *
+     * @param driver The Nomad task driver name
+     * @return {@code true} if the driver natively manages containers
+     */
+    static boolean isTaskDriverContainerNative(String driver) {
+        return CONTAINER_NATIVE_DRIVERS.contains(driver)
+    }
+
+    /**
+     * Global default: returns true when the global nomad.jobs.driver is container-native.
+     * Overrides Nextflow's {@link Executor#isContainerNative()}.
      */
     @Override
     boolean isContainerNative() {
-        return nomadConfig.jobOpts().driver == "docker"
+        return isTaskDriverContainerNative(nomadConfig.jobOpts().driver)
+    }
+
+    /**
+     * Task-aware container native check.
+     * Resolves per-process driver override (nomadOptions.driver) and returns true
+     * only when the resolved Nomad task driver is container-native (docker, podman).
+     * For HPC drivers (pbs, slurm) and process drivers (raw_exec, exec), returns false
+     * so Nextflow generates container-wrapped .command.run scripts
+     * (e.g. singularity exec, apptainer exec).
+     */
+    @Override
+    boolean isContainerNative(TaskRun task) {
+        final driver = JobBuilder.resolveDriver(task, nomadConfig.jobOpts())
+        return isTaskDriverContainerNative(driver)
+    }
+
+    /**
+     * Task-aware container config engine.
+     * When the resolved Nomad task driver is container-native, returns the driver name
+     * so Nextflow uses the matching ContainerConfig (e.g. DockerConfig for docker).
+     * For non-container-native drivers, returns null — letting Nextflow use whichever
+     * container engine is enabled in config (singularity, apptainer, etc.).
+     */
+    @Override
+    String containerConfigEngine(TaskRun task) {
+        final driver = JobBuilder.resolveDriver(task, nomadConfig.jobOpts())
+        return isTaskDriverContainerNative(driver) ? driver : null
     }
 }

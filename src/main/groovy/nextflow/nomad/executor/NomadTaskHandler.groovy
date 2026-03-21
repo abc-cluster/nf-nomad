@@ -25,6 +25,7 @@ import nextflow.exception.ProcessSubmitException
 import nextflow.executor.BashWrapperBuilder
 import nextflow.executor.ScriptFileCopyStrategy
 import nextflow.fusion.FusionAwareTask
+import nextflow.nomad.builders.JobBuilder
 import nextflow.nomad.config.NomadConfig
 import nextflow.nomad.NomadHelper
 import nextflow.nomad.util.NomadLogging
@@ -214,7 +215,7 @@ class NomadTaskHandler extends TaskHandler implements FusionAwareTask {
     }
 
     String submitTask() {
-        final driver = config.jobOpts()?.driver ?: "docker"
+        final driver = JobBuilder.resolveDriver(task, config.jobOpts())
         if (driver == "docker" && !task.container)
             throw new ProcessSubmitException("[NOMAD] Missing container image for process `$task.processor.name`")
 
@@ -262,7 +263,7 @@ class NomadTaskHandler extends TaskHandler implements FusionAwareTask {
     }
 
     protected List<String> classicSubmitCli(TaskRun task) {
-        final driver = config.jobOpts()?.driver ?: "docker"
+        final driver = JobBuilder.resolveDriver(task, config.jobOpts())
         final result = new ArrayList(BashWrapperBuilder.BASH)
         if (driver != "docker") {
             // HPC drivers: use relative path — abc-hpc-bridge cd's to work_dir first

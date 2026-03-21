@@ -77,6 +77,13 @@ class NomadExecutor extends Executor implements ExtensionPoint {
         return FusionHelper.isFusionEnabled(session)
     }
 
+    /**
+     * Returns true when the executor manages containers natively (i.e. Nomad docker driver).
+     * This is per-executor, not per-task — for mixed-driver pipelines (docker + pbs/slurm),
+     * the global nomad.jobs.driver determines the default. Per-process driver overrides
+     * via nomadOptions affect the Nomad job definition but not Nextflow's script generation.
+     * Cross-node-pool container orchestration is the abc-control-plane's responsibility.
+     */
     @Override
     boolean isContainerNative() {
         return nomadConfig.jobOpts().driver == "docker"

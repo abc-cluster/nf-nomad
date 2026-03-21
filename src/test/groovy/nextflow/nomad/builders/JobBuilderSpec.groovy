@@ -22,7 +22,9 @@ import nextflow.executor.Executor
 import nextflow.executor.ExecutorConfig
 import nextflow.nomad.config.NomadJobOpts
 import nextflow.nomad.executor.NomadLifecycleTaskSpec
+import nextflow.nomad.executor.TaskDirectives
 import nextflow.processor.TaskConfig
+import nextflow.script.ProcessConfig
 import nextflow.processor.TaskProcessor
 import nextflow.processor.TaskRun
 import nextflow.util.Duration
@@ -265,5 +267,103 @@ class JobBuilderSpec extends Specification {
         task.env == env
     }
 
+    def "test resolveDriver uses per-process nomadOptions driver over global"() {
+        given:
+        def jobOpts = Mock(NomadJobOpts) {
+            driver >> "docker"
+        }
+        def processConfig = Mock(ProcessConfig)
+        processConfig.get(_ as String) >> { String key ->
+            if (key == TaskDirectives.NOMAD_OPTIONS) return [driver: 'pbs']
+            return null
+        }
+        def processor = Mock(TaskProcessor)
+        processor.getConfig() >> processConfig
+        def task = Mock(TaskRun) {
+            getProcessor() >> processor
+        }
 
+        expect:
+        JobBuilder.resolveDriver(task, jobOpts) == 'pbs'
+    }
+
+    def "test resolveDriver falls back to global jobOpts driver"() {
+        given:
+        def jobOpts = Mock(NomadJobOpts) {
+            driver >> "slurm"
+        }
+        def processConfig = Mock(ProcessConfig)
+        processConfig.get(_ as String) >> null
+        def processor = Mock(TaskProcessor)
+        processor.getConfig() >> processConfig
+        def task = Mock(TaskRun) {
+            getProcessor() >> processor
+        }
+
+        expect:
+        JobBuilder.resolveDriver(task, jobOpts) == 'slurm'
+    }
+
+    def "test resolveDriver defaults to docker when no driver specified"() {
+        given:
+        def jobOpts = Mock(NomadJobOpts) {
+            driver >> null
+        }
+        def processConfig = Mock(ProcessConfig)
+        processConfig.get(_ as String) >> null
+        def processor = Mock(TaskProcessor)
+        processor.getConfig() >> processConfig
+        def task = Mock(TaskRun) {
+            getProcessor() >> processor
+        }
+
+        expect:
+        JobBuilder.resolveDriver(task, jobOpts) == 'docker'
+    }
+
+    def "test createTask respects per-process driver override to pbs"() {
+        given:
+        def jobOpts = Mock(NomadJobOpts) {
+            driver >> "docker"
+        }
+        // Process config with nomadOptions.driver = 'pbs'
+        def processConfig = Mock(ProcessConfig)
+        processConfig.get(_ as String) >> { String key ->
+            if (key == TaskDirectives.NOMAD_OPTIONS) return [driver: 'pbs']
+            return null
+        }
+        def processor = Mock(TaskProcessor)
+        processor.getConfig() >> processConfig
+        def executor = Mock(Executor) {
+            getConfig() >> Mock(ExecutorConfig)
+        }
+        processor.getExecutor() >> executor
+        def mockTaskConfig = new TaskConfig([
+                queue: 'gpu',
+                time: '2h',
+                cpus: 4,
+                memory: '8 GB',
+        ])
+        def mockWorkDir = new File("/scratch/work/ab/cd1234").toPath()
+        def task = Mock(TaskRun) {
+            getProcessor() >> processor
+            getName() >> "hpcProcess"
+            getConfig() >> mockTaskConfig
+            getWorkDir() >> mockWorkDir
+            getContainer() >> null
+        }
+        def args = ["bash", ".command.run"]
+        def env = [NXF_TASK_WORKDIR: "/scratch/work/ab/cd1234"]
+
+        when:
+        Task nomadTask = JobBuilder.createTask(task, args, env, jobOpts)
+
+        then:
+        nomadTask.driver == "pbs"
+        nomadTask.config.work_dir == "/scratch/work/ab/cd1234"
+        nomadTask.config.queue == "gpu"
+        // Should NOT have docker-specific fields
+        nomadTask.config.image == null
+        nomadTask.config.privileged == null
+    }
 }

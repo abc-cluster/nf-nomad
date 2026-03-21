@@ -305,7 +305,7 @@ class JobBuilder {
     }
 
     static Task createTask(TaskRun task, List<String> args, Map<String, String>env, NomadJobOpts jobOpts, List<JobVolume> volumeSpecs) {
-        final driver = jobOpts?.driver ?: "docker"
+        final driver = resolveDriver(task, jobOpts)
         final workingDir = task.workDir.toAbsolutePath().toString()
         final taskResources = getResources(task, jobOpts)
 
@@ -334,6 +334,15 @@ class JobBuilder {
         constraints(task, taskDef, jobOpts)
         secrets(task, taskDef, jobOpts)
         return taskDef
+    }
+
+    /**
+     * Resolve the Nomad driver for a task.
+     * Per-process nomadOptions.driver takes precedence over global nomad.jobs.driver.
+     */
+    static String resolveDriver(TaskRun task, NomadJobOpts jobOpts) {
+        final perProcess = NomadTaskOptionsResolver.driver(task)
+        return perProcess ?: jobOpts?.driver ?: "docker"
     }
 
     /**

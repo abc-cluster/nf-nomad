@@ -305,24 +305,19 @@ class JobBuilder {
     }
 
     static Task createTask(TaskRun task, List<String> args, Map<String, String>env, NomadJobOpts jobOpts, List<JobVolume> volumeSpecs) {
-        final DRIVER = "docker"
-
-        final imageName = task.container
+        final driver = jobOpts?.driver ?: "docker"
         final workingDir = task.workDir.toAbsolutePath().toString()
         final taskResources = getResources(task, jobOpts)
 
+        def taskConfig = (driver == "docker")
+                ? buildDockerConfig(task, args, jobOpts, workingDir)
+                : buildHpcConfig(task, args, workingDir, taskResources)
 
         def taskDef = new Task(
                 name: "nf-task",
-                driver: DRIVER,
+                driver: driver,
                 resources: taskResources,
-                config: [
-                        image     : imageName,
-                        privileged: (jobOpts?.privileged != null ? jobOpts.privileged : true),
-                        work_dir  : workingDir,
-                        command   : args.first(),
-                        args      : args.tail(),
-                ] as Map<String, Object>,
+                config: taskConfig,
                 env: env,
         )
 
@@ -331,12 +326,79 @@ class JobBuilder {
             taskDef.shutdownDelay(shutdownDelay)
         }
 
-        volumes(task, taskDef, workingDir, jobOpts, volumeSpecs)
+        if( driver == "docker" ) {
+            volumes(task, taskDef, workingDir, jobOpts, volumeSpecs)
+        }
         affinity(task, taskDef, jobOpts)
         constraint(task, taskDef, jobOpts)
         constraints(task, taskDef, jobOpts)
         secrets(task, taskDef, jobOpts)
         return taskDef
+    }
+
+    /**
+     * Build task config for Docker driver (original behavior).
+     */
+    private static Map<String, Object> buildDockerConfig(TaskRun task, List<String> args, NomadJobOpts jobOpts, String workingDir) {
+        return [
+                image     : task.container,
+                privileged: (jobOpts?.privileged != null ? jobOpts.privileged : true),
+                work_dir  : workingDir,
+                command   : args.first(),
+                args      : args.tail(),
+        ] as Map<String, Object>
+    }
+
+    /**
+     * Build task config for HPC drivers (pbs, slurm).
+     * Sources cpus and memory from the already-computed Nomad Resources object
+     * (which respects cpuMode, memoryMax, accelerators, and nomadOptions overrides).
+     * Other scheduling fields come from standard Nextflow process directives
+     * and executor config properties, matching abc-hpc-bridge's CommonTaskConfig.
+     */
+    private static Map<String, Object> buildHpcConfig(TaskRun task, List<String> args, String workingDir, Resources taskResources) {
+        final taskCfg = task.getConfig()
+
+        def config = [
+                command     : args.first(),
+                args        : args.tail(),
+                work_dir    : workingDir,
+                stdout_file : "${workingDir}/.command.log".toString(),
+                stderr_file : "${workingDir}/.command.log".toString(),
+        ] as Map<String, Object>
+
+        // queue → PBS queue or SLURM partition
+        if (taskCfg.queue) {
+            config.queue = taskCfg.queue.toString()
+        }
+
+        // time → walltime (HH:mm:ss)
+        if (taskCfg.getTime()) {
+            config.walltime = taskCfg.getTime().format('HH:mm:ss')
+        }
+
+        // cpus_per_task and memory sourced from Nomad Resources
+        // (already resolved via getResources with cpuMode, limits, and nomadOptions)
+        if (taskResources.cores) {
+            config.cpus_per_task = taskResources.cores
+        }
+        if (taskResources.memoryMB) {
+            config.memory = taskResources.memoryMB
+        }
+
+        // executor.account → account
+        final account = task.processor?.executor?.config?.getExecConfigProp('nomad', 'account', null) as String
+        if (account) {
+            config.account = account
+        }
+
+        // clusterOptions → extra_args
+        final clusterOpts = taskCfg.getClusterOptionsAsList()
+        if (clusterOpts) {
+            config.extra_args = clusterOpts
+        }
+
+        return config
     }
 
     static protected Task volumes(TaskRun task, Task taskDef, String workingDir, NomadJobOpts jobOpts, List<JobVolume> volumeSpecs){

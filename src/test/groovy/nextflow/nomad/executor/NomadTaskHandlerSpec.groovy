@@ -48,7 +48,9 @@ class NomadTaskHandlerSpec extends Specification{
             getContainer() >> null
             getProcessor() >> Mock(TaskProcessor)
         }
-        def mockConfig = Mock(NomadConfig)
+        def mockConfig = Mock(NomadConfig){
+            jobOpts() >> Stub(NomadJobOpts){ driver >> "docker" }
+        }
         def mockService = Mock(NomadService)
         def taskHandler = new NomadTaskHandler(mockTask, mockConfig, mockService)
 
@@ -81,7 +83,9 @@ class NomadTaskHandlerSpec extends Specification{
                     getOutputFiles() >> ['dont_know_why_is_required_in_test']
             }
         }
-        def mockConfig = Mock(NomadConfig)
+        def mockConfig = Mock(NomadConfig){
+            jobOpts() >> Stub(NomadJobOpts){ driver >> "docker" }
+        }
         def mockService = Mock(NomadService)
         def taskHandler = new NomadTaskHandler(mockTask, mockConfig, mockService)
 

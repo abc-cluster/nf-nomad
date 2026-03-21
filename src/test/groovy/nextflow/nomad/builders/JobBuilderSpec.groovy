@@ -17,9 +17,16 @@
 package nextflow.nomad.builders
 
 
+import io.nomadproject.client.model.Task
+import nextflow.executor.Executor
+import nextflow.executor.ExecutorConfig
 import nextflow.nomad.config.NomadJobOpts
 import nextflow.nomad.executor.NomadLifecycleTaskSpec
+import nextflow.processor.TaskConfig
+import nextflow.processor.TaskProcessor
 import nextflow.processor.TaskRun
+import nextflow.util.Duration
+import nextflow.util.MemoryUnit
 import spock.lang.Specification
 
 /**
@@ -47,7 +54,9 @@ class JobBuilderSpec extends Specification {
 
     def "test createTask method"() {
         given:
-        def jobOpts = Mock(NomadJobOpts)
+        def jobOpts = Mock(NomadJobOpts) {
+            driver >> "docker"
+        }
         def taskRun = Mock(TaskRun)
         def args = ["arg1", "arg2"]
         def env = ["key": "value"]
@@ -201,6 +210,59 @@ class JobBuilderSpec extends Specification {
         then:
         // meta should be null or empty when no manifest or meta provided
         task.meta == null || task.meta.isEmpty()
+    }
+
+
+    def "test createTask with pbs driver produces hpc config"() {
+        given:
+        def jobOpts = Mock(NomadJobOpts) {
+            driver >> "pbs"
+        }
+        def mockTaskConfig = new TaskConfig([
+                queue: 'gpu',
+                time: '4h',
+                cpus: 8,
+                memory: '16 GB',
+                clusterOptions: '-l ngpus=2',
+        ])
+        def mockExecConfig = Mock(ExecutorConfig) {
+            getExecConfigProp('nomad', 'account', null) >> "myaccount"
+        }
+        def mockExecutor = Mock(Executor) {
+            getConfig() >> mockExecConfig
+        }
+        def mockProcessor = Mock(TaskProcessor) {
+            getExecutor() >> mockExecutor
+        }
+        def taskRun = Mock(TaskRun) {
+            workDir >> new File("/scratch/work/ab/cd1234").toPath()
+            getConfig() >> mockTaskConfig
+            processor >> mockProcessor
+        }
+        def args = ["bash", ".command.run"]
+        def env = ["NF_TASK_NAME": "hello"]
+
+        when:
+        def task = JobBuilder.createTask(taskRun, args, env, jobOpts)
+
+        then:
+        task.name == "nf-task"
+        task.driver == "pbs"
+        task.config.command == "bash"
+        task.config.args == [".command.run"]
+        task.config.work_dir == "/scratch/work/ab/cd1234"
+        task.config.stdout_file == "/scratch/work/ab/cd1234/.command.log"
+        task.config.stderr_file == "/scratch/work/ab/cd1234/.command.log"
+        task.config.queue == "gpu"
+        task.config.walltime == "04:00:00"
+        task.config.cpus_per_task == 8
+        task.config.memory == 16384
+        task.config.account == "myaccount"
+        task.config.extra_args == ["-l", "ngpus=2"]
+        // Docker-specific fields should NOT be present
+        task.config.image == null
+        task.config.privileged == null
+        task.env == env
     }
 
 

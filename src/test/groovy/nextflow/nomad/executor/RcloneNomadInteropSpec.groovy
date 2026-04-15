@@ -269,6 +269,29 @@ class RcloneNomadInteropSpec extends Specification {
         interop.commands.count { List<String> cmd -> cmd[0] == 'rclone' && cmd[1] == 'cat' } >= 1
     }
 
+    void 'should fail synchronize completion when remote policy violation marker exists'() {
+        given:
+        def sessionDir = tempDir.resolve('session-policy-violation')
+        def workDir = sessionDir.resolve('ee').resolve('11223344')
+        Files.createDirectories(workDir)
+        Files.writeString(workDir.resolve('.command.run'), 'echo ok\n')
+        Files.writeString(workDir.resolve('.command.sh'), 'echo ok\n')
+        writeRuntimeMetadata(sessionDir)
+
+        def task = mockTask(workDir)
+        def cfg = [rclone: [rcloneWorkDir: [enabled: true, remote: 'minio', remotePath: 'work/run']]]
+        def interop = new PolicyViolationInterop(task, cfg, sessionDir)
+        interop.prepare()
+
+        when:
+        interop.synchronizeCompletion()
+
+        then:
+        def e = thrown(nextflow.exception.ProcessSubmitException)
+        e.message.contains('Transfer policy violation')
+        e.message.contains('blocked by jurist')
+    }
+
     void 'should gracefully return null copy strategy when nf-rclone classes are unavailable'() {
         given:
         def sessionDir = tempDir.resolve('session-copy-strategy')
@@ -369,6 +392,9 @@ class RcloneNomadInteropSpec extends Specification {
         @Override
         protected CommandResult runCommand(List<String> command) {
             commands << command
+            if( command.size() > 1 && command[1] == 'cat' && command.any { it.contains('.policy-violation.json') } ) {
+                return new CommandResult(1, '', 'not found')
+            }
             if( command.size() > 1 && command[1] == 'cat' ) {
                 return new CommandResult(0, '17\n', '')
             }
@@ -386,10 +412,27 @@ class RcloneNomadInteropSpec extends Specification {
         @Override
         protected CommandResult runCommand(List<String> command) {
             commands << command
+            if( command.size() > 1 && command[1] == 'cat' && command.any { it.contains('.policy-violation.json') } ) {
+                return new CommandResult(1, '', 'not found')
+            }
             if( command.size() > 1 && command[1] == 'cat' ) {
                 return new CommandResult(1, '', 'not found')
             }
             return new CommandResult(0, '', '')
+        }
+    }
+
+    private static class PolicyViolationInterop extends RcloneNomadInterop {
+        PolicyViolationInterop(TaskRun task, Map sessionConfig, Path sessionWorkDir) {
+            super(task, sessionConfig, sessionWorkDir)
+        }
+
+        @Override
+        protected CommandResult runCommand(List<String> command) {
+            if( command.size() > 1 && command[1] == 'cat' && command.any { it.contains('.policy-violation.json') } ) {
+                return new CommandResult(0, '{"reason":"blocked by jurist"}\n', '')
+            }
+            return new CommandResult(0, '17\n', '')
         }
     }
 }

@@ -1,6 +1,8 @@
 package nextflow.nomad.executor
 
 import groovy.util.logging.Slf4j
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
 import nextflow.exception.ProcessSubmitException
 import nextflow.processor.TaskRun
 import nextflow.util.Duration
@@ -9,6 +11,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Base64
 import java.util.Properties
+import java.net.HttpURLConnection
+import java.net.URL
 
 @Slf4j
 class RcloneNomadInterop {
@@ -38,6 +42,10 @@ class RcloneNomadInterop {
     final String sidecarUser
     final long completionTimeoutMillis
     final String rcloneConfigPath
+    final boolean legalTransferEnabled
+    final String policyServiceUrl
+    final boolean policyFailOpen
+    final int policyTimeoutMillis
 
     private List<String> submitCommand = Collections.emptyList()
     private Map<String, String> submitEnv = Collections.emptyMap()
@@ -61,6 +69,11 @@ class RcloneNomadInterop {
         this.sidecarUser = toText(workScope.get('sidecarUser'))
         this.completionTimeoutMillis = parseDurationMillis(workScope.get('completionTimeout'), DEFAULT_COMPLETION_TIMEOUT_MS)
         this.rcloneConfigPath = resolveRcloneConfigPath(sessionWorkDir, rcloneScope)
+        final Map legalScope = readMap(workScope, 'legalTransfer')
+        this.legalTransferEnabled = toBoolean(legalScope.get('enabled'))
+        this.policyServiceUrl = toText(legalScope.get('policyServiceUrl'))
+        this.policyFailOpen = toBoolean(legalScope.containsKey('failOpen') ? legalScope.get('failOpen') : true)
+        this.policyTimeoutMillis = parseInteger(legalScope.get('timeoutMillis'), 5000)
     }
 
     List<String> getSubmitCommand() {
@@ -165,6 +178,7 @@ class RcloneNomadInterop {
         else {
             buildBootstrapSubmission()
         }
+        enforceLegalTransferPolicy()
     }
 
     Integer synchronizeCompletion() {
@@ -172,6 +186,10 @@ class RcloneNomadInterop {
             return null
         }
         validateConfiguration()
+        String policyViolation = readRemotePolicyViolationMessage()
+        if( policyViolation ) {
+            throw new ProcessSubmitException("[NOMAD] Transfer policy violation: ${policyViolation}")
+        }
 
         Integer remoteExit = awaitRemoteExitCode()
         if( syncBack == 'none' ) {
@@ -217,12 +235,17 @@ class RcloneNomadInterop {
         if( transferMode == TRANSFER_MODE_SIDECAR && sidecarDriver == SIDECAR_DRIVER_DOCKER && !sidecarImage ) {
             throw new ProcessSubmitException('[NOMAD] nf-rclone sidecar driver `docker` requires `rclone.rcloneWorkDir.sidecarImage`')
         }
+        if( legalTransferEnabled && !policyServiceUrl ) {
+            throw new ProcessSubmitException('[NOMAD] legal transfer policy is enabled but `rclone.rcloneWorkDir.legalTransfer.policyServiceUrl` is missing')
+        }
     }
 
     protected void uploadCommandFiles() {
         final List<String> cmd = [
                 'rclone', 'copy',
                 '--config', rcloneConfigPath,
+                '--retries', '3',
+                '--low-level-retries', '10',
                 '--include', '.command.*',
                 task.workDir.toString(),
                 remoteTaskDir()
@@ -444,6 +467,8 @@ class RcloneNomadInterop {
         final List<String> cmd = [
                 'rclone', 'cat',
                 '--config', rcloneConfigPath,
+                '--retries', '3',
+                '--low-level-retries', '10',
                 remoteExitFile()
         ]
         final CommandResult result = runCommand(cmd)
@@ -464,6 +489,8 @@ class RcloneNomadInterop {
         final List<String> cmd = [
                 'rclone', 'copy',
                 '--config', rcloneConfigPath,
+                '--retries', '3',
+                '--low-level-retries', '10',
                 remoteTaskDir(),
                 task.workDir.toString()
         ]
@@ -477,6 +504,8 @@ class RcloneNomadInterop {
         final List<String> cmd = [
                 'rclone', 'copy',
                 '--config', rcloneConfigPath,
+                '--retries', '3',
+                '--low-level-retries', '10',
                 '--include', '.exitcode',
                 '--include', '.command.*',
                 remoteTaskDir(),
@@ -512,6 +541,8 @@ class RcloneNomadInterop {
         final List<String> cmd = [
                 'rclone', 'cat',
                 '--config', rcloneConfigPath,
+                '--retries', '3',
+                '--low-level-retries', '10',
                 remotePoststopExitFile()
         ]
         final CommandResult result = runCommand(cmd)
@@ -934,6 +965,142 @@ exit "$_exit_code"
             this.exitCode = exitCode
             this.stdout = stdout
             this.stderr = stderr
+        }
+    }
+
+    protected int parseInteger(Object value, int defaultValue) {
+        if( value == null ) return defaultValue
+        try {
+            if( value instanceof Number ) return ((Number)value).intValue()
+            return Integer.parseInt(value.toString())
+        }
+        catch (Exception ignored) {
+            return defaultValue
+        }
+    }
+
+    protected String remotePolicyViolationFile() {
+        return "${remoteTaskDir()}.policy-violation.json"
+    }
+
+    protected String readRemotePolicyViolationMessage() {
+        final List<String> cmd = [
+                'rclone', 'cat',
+                '--config', rcloneConfigPath,
+                '--retries', '2',
+                remotePolicyViolationFile()
+        ]
+        final CommandResult result = runCommand(cmd)
+        if( result.exitCode != 0 || !result.stdout?.trim() ) {
+            return null
+        }
+        try {
+            def parsed = new JsonSlurper().parseText(result.stdout)
+            return parsed?.reason?.toString() ?: parsed?.message?.toString() ?: result.stdout.trim()
+        }
+        catch (Exception ignored) {
+            return result.stdout.trim()
+        }
+    }
+
+    protected void writeRemotePolicyViolation(String reason, Map details = Collections.emptyMap()) {
+        try {
+            Path tmp = Files.createTempFile('nf-rclone-policy-violation-', '.json')
+            def payload = new LinkedHashMap<String, Object>()
+            payload.put('reason', reason ?: 'transfer rejected by policy')
+            payload.put('task', task?.name)
+            payload.put('remoteTaskDir', remoteTaskDir())
+            payload.put('details', details ?: Collections.emptyMap())
+            Files.writeString(tmp, JsonOutput.toJson(payload))
+            final List<String> cmd = [
+                    'rclone', 'copyto',
+                    '--config', rcloneConfigPath,
+                    tmp.toString(),
+                    remotePolicyViolationFile()
+            ]
+            runCommand(cmd)
+            Files.deleteIfExists(tmp)
+        }
+        catch (Exception e) {
+            log.warn("[NOMAD] Unable to write remote policy-violation marker: ${e.message ?: e}")
+        }
+    }
+
+    protected List<Map<String, Object>> collectTransferEntries() {
+        final List<Map<String, Object>> out = []
+        lifecycleTasks?.each { NomadLifecycleTaskSpec spec ->
+            if( !spec?.transferManifest ) {
+                return
+            }
+            try {
+                def manifest = new JsonSlurper().parseText(spec.transferManifest)
+                def transfers = manifest?.transfers instanceof List ? (List)manifest.transfers : Collections.emptyList()
+                transfers.each { item ->
+                    if( item instanceof Map ) {
+                        out.add(new LinkedHashMap<String, Object>((Map)item))
+                    }
+                }
+            }
+            catch (Exception e) {
+                log.debug("[NOMAD] Unable to parse lifecycle transfer manifest: ${e.message ?: e}")
+            }
+        }
+        return out
+    }
+
+    protected void enforceLegalTransferPolicy() {
+        if( !legalTransferEnabled ) {
+            return
+        }
+        final List<Map<String, Object>> transfers = collectTransferEntries()
+        if( !transfers ) {
+            return
+        }
+        try {
+            final URL url = new URL(policyServiceUrl)
+            final HttpURLConnection conn = (HttpURLConnection)url.openConnection()
+            conn.setRequestMethod('POST')
+            conn.setRequestProperty('Content-Type', 'application/json')
+            conn.setConnectTimeout(policyTimeoutMillis)
+            conn.setReadTimeout(policyTimeoutMillis)
+            conn.setDoOutput(true)
+
+            final Map payload = [
+                    user    : [sub: System.getenv('USER') ?: 'nextflow', groups: []],
+                    job     : [id: task?.name ?: 'unknown', namespace: readMap(readMap(sessionConfig, 'nomad'), 'jobs').get('namespace') ?: 'default'],
+                    transfers: transfers,
+                    options : [legal_transfer_enabled: true]
+            ]
+            byte[] bytes = JsonOutput.toJson(payload).getBytes('UTF-8')
+            conn.outputStream.withCloseable { it.write(bytes) }
+            int status = conn.responseCode
+            String body = null
+            try {
+                body = conn.inputStream?.getText('UTF-8')
+            }
+            catch (Exception ignored) {
+                body = conn.errorStream?.getText('UTF-8')
+            }
+            if( status >= 400 ) {
+                throw new RuntimeException("policy service returned HTTP ${status}: ${body ?: 'no body'}")
+            }
+            Map parsed = body ? (Map)new JsonSlurper().parseText(body) : Collections.emptyMap()
+            boolean allowed = toBoolean(parsed?.allowed)
+            if( !allowed ) {
+                String reason = parsed?.reason?.toString() ?: parsed?.message?.toString() ?: 'transfer rejected by policy service'
+                writeRemotePolicyViolation(reason, [response: parsed])
+                throw new ProcessSubmitException("[NOMAD] Transfer policy violation: ${reason}")
+            }
+        }
+        catch (ProcessSubmitException e) {
+            throw e
+        }
+        catch (Exception e) {
+            if( policyFailOpen ) {
+                log.warn("[NOMAD] Transfer policy check failed with failOpen=true; continuing. Cause: ${e.message ?: e}")
+                return
+            }
+            throw new ProcessSubmitException("[NOMAD] Transfer policy check failed: ${e.message ?: e}", e)
         }
     }
 }

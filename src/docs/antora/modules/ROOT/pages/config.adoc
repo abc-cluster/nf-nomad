@@ -126,6 +126,42 @@ rclone {
 
 `configDelivery` defaults to `hostPath`. This keeps rclone credentials/config mounted as a file path (`NXF_RCLONE_CONFIG`) instead of embedding config content in environment payloads (`inline` mode). For remote workDir flows that execute generated `.command.*` files (which may contain arbitrary shell), `hostPath` is the safer default and avoids quoting/encoding edge cases.
 
+When `configDelivery = inline`, the head node base64-encodes the resolved rclone config and passes it through Nomad task environment variables; the bootstrap materializes a local `./.rclone.conf` before running `rclone`. This avoids requiring the same absolute config path on every client, but operators should treat Nomad job/task env visibility as a security trade-off.
+
+`syncBack` controls how much of the remote task directory is copied back to the local Nextflow work directory after Nomad reaches a terminal state:
+
+- `all` (default): copy the full remote task directory (safest for standard Nextflow output collection).
+- `none`: copy only command metadata needed for completion semantics (outputs may remain remote-only).
+- `declared`: accepted for forward compatibility; behaviour currently matches `all` until selective sync is implemented end-to-end.
+
+==== Optional legal transfer policy (`rclone.rcloneWorkDir.legalTransfer`)
+
+When `nf-rclone` is used with remote work directories, `RcloneNomadInterop` can optionally call an HTTP policy service before submitting the Nomad task. This is **off by default** (`enabled = false`).
+
+[source,groovy]
+----
+rclone {
+    rcloneWorkDir {
+        enabled = true
+        remote = 'localminio'
+        remotePath = 'work/nf-core-demo'
+        legalTransfer {
+            enabled = false
+            policyServiceUrl = 'http://127.0.0.1:8080/v1/transfer/validate'
+            failOpen = true
+            timeoutMillis = 5000
+        }
+    }
+}
+----
+
+- `enabled`: when `true`, a `POST` is sent to `policyServiceUrl` with a JSON body containing a `transfers` list derived from Nomad lifecycle transfer manifests (when sidecar mode provides them). If the service responds with `allowed=false`, the plugin writes `.policy-violation.json` to the remote task prefix and fails submission with an explicit error.
+- `policyServiceUrl`: required when `enabled=true`.
+- `failOpen`: when `true` (default), network or unexpected errors talking to the policy service are logged and execution continues; when `false`, those errors fail the task submit path.
+- `timeoutMillis`: connect and read timeout for the HTTP policy check.
+
+On completion, if `.policy-violation.json` is present in the remote task directory (written by the policy hook or a lifecycle task), `synchronizeCompletion()` fails before exit-code handling so the violation is visible on the Nextflow head path.
+
 === Process directives
 
 The plugin supports process-level Nomad directives in two forms:

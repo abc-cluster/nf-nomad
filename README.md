@@ -85,6 +85,18 @@ nomad {
 }
 ```
 
+## nf-rclone remote work directory interop (experimental)
+
+When pipelines also load `nf-rclone` and set `rclone.rcloneWorkDir.enabled = true`, `NomadTaskHandler` delegates upload/bootstrap/poll/sync steps to `RcloneNomadInterop` so Nomad clients do not need a shared filesystem with the Nextflow head node.
+
+Highlights:
+
+- `configDelivery = hostPath | inline` — `inline` base64-encodes the session rclone config into Nomad env vars so clients can materialize `./.rclone.conf` locally; `hostPath` expects the same absolute config path on every client.
+- `syncBack = all | none | declared` — `declared` is accepted for forward compatibility but currently behaves like `all` until selective sync lands.
+- Optional `rclone.rcloneWorkDir.legalTransfer { enabled, policyServiceUrl, failOpen, timeoutMillis }` performs an HTTP `POST` before submit (transfer manifests from lifecycle hooks) and surfaces `.policy-violation.json` if the policy service denies a transfer.
+
+See `src/docs/antora/modules/ROOT/pages/config.adoc` (*nf-rclone remote workDir interop*) for the full configuration matrix and semantics.
+
 ## Process-level Nomad options
 
 Process directives support both legacy keys (`datacenters`, `constraints`, `secret`, `spread`) and the preferred map-based `nomadOptions` directive:
